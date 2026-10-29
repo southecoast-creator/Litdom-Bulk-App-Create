@@ -5,7 +5,7 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
-base: '/Litdom-Bulk-App-Create/',
+base: './',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
