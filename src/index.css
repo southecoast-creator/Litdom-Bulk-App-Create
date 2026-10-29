@@ -1,0 +1,38 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --litdom-obsidian: #0B0B0F;
+    --litdom-surface: #17171C;
+    --litdom-surface-elevated: #212128;
+    --litdom-gold: #D4AF37;
+    --litdom-gold-soft: #F4D58D;
+    --litdom-cream: #FFF8E7;
+    --litdom-antique: #8C7625;
+  }
+
+  body {
+    background-color: #0B0B0F;
+    color: #FFF8E7;
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+}
+
+/* Custom scrollbar for mobile / desktop */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0B0B0F;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a2a35;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #8C7625;
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Litdom Batch Studio",
+  "description": "Client-side batch multi-page design generator and spreadsheet text population studio with custom typography, PDF/ZIP export, and touch-first controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
