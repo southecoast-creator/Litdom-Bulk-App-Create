@@ -4,13 +4,46 @@
  * scaled to each image from a 1000px baseline.
  */
 
+export interface TextRunEffect {
+  shadow?: {
+    enabled?: boolean;
+    color: string;
+    blur: number;
+    offsetX: number;
+    offsetY: number;
+  };
+  outline?: {
+    enabled?: boolean;
+    color: string;
+    width: number;
+  };
+  glow?: {
+    enabled?: boolean;
+    color: string;
+    strength: number; // drawn as blurred glow shadow
+  };
+}
+
+export interface TextRun {
+  text: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
+  color?: string;
+  fontFamily?: string;
+  fontSize?: number; // stored for a 1000px-wide baseline
+  letterSpacing?: number;
+  effects?: TextRunEffect;
+}
+
 export interface TextBoxTemplate {
   id: string;
   fieldLabel: string; // e.g. "Title", "Subtitle", "Paragraph 1", "CTA"
   x: number; // percentage 0 - 100
   y: number; // percentage 0 - 100
   width: number; // percentage 0 - 100
-  height: number; // percentage 0 - 100
+  height?: number; // automatic computed height (kept optional for legacy records)
   fontFamily: string;
   fontSize: number; // stored for a 1000px-wide baseline
   fontWeight: '400' | '500' | '600' | '700' | '800';
@@ -42,7 +75,8 @@ export interface DesignPage {
   name: string;
   width: number; // original pixel width
   height: number; // original pixel height
-  values: Record<string, string>; // fieldLabel -> text value
+  values: Record<string, string>; // fieldLabel -> plain text value
+  richValues?: Record<string, TextRun[]>; // fieldLabel -> rich text runs
   textBoxes?: TextBoxTemplate[]; // Per-design text boxes (geometry & styles)
 }
 
@@ -72,7 +106,8 @@ export interface Project {
 export interface StoredImageRecord {
   id: string;
   originalBlob: Blob;
-  thumbnailBlob: Blob;
+  previewBlob?: Blob; // ~1200px wide preview for high-speed editing
+  thumbnailBlob: Blob; // ~240px thumbnail
   mimeType: string;
   width: number;
   height: number;
@@ -88,5 +123,14 @@ export interface StoredFontRecord {
   fileSize: number;
   createdAt: number;
 }
+
+export interface StorageBreakdown {
+  designsBytes: number;
+  fontsBytes: number;
+  projectsBytes: number;
+  totalBytes: number;
+  projectSizes: Record<string, number>;
+}
+
 
 

@@ -1,7 +1,8 @@
 /**
- * Litdom Batch Studio - Screen 2: Unified Workspace (Single Screen, Zero Tabs)
- * Top bar, responsive cached canvas, touch-drag on canvas, active page text editors,
- * shared template style panel, bottom sheets triggers, and always-visible thumbnail strip.
+ * Litdom Batch Studio - Screen 2: Unified Workspace
+ * Automatic text box height (like Canva), rich text word formatting & double-tap editor,
+ * thumbnail strip multi-page deletion, in-memory undo/redo, RAF drawing coalescing,
+ * and downscaled preview image caching.
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
@@ -25,34 +26,47 @@ import {
   AlignJustify,
   Minus,
   Check,
-  HardDrive,
   Sliders,
   Layers,
   Sparkles,
+  Undo2,
+  Redo2,
+  CheckSquare,
+  Square,
+  Edit3,
+  AlertTriangle,
 } from 'lucide-react';
-import { Project, TextBoxTemplate, DesignPage, CustomFont, StoredFontRecord } from '../types';
+import {
+  Project,
+  TextBoxTemplate,
+  DesignPage,
+  StoredFontRecord,
+  TextRun,
+} from '../types';
 import {
   saveProject,
   storeImageFile,
   getThumbnailBlob,
-  getOriginalImageBlob,
+  getPreviewImageBlob,
   createManagedObjectUrl,
-  revokeManagedObjectUrl,
   revokeAllManagedObjectUrls,
+  deleteDesignsFromProjectAtomic,
 } from '../utils/db';
 import {
   renderDesignToCanvas,
-  preloadTemplateFonts,
+  computeTextBoxLayout,
   BUILTIN_FONTS,
   clearDecodedImageCache,
+  predecodeImages,
 } from '../utils/canvasEngine';
 import { populateDesignsFromSpreadsheet } from '../utils/spreadsheetEngine';
 import { loadAllStoredFonts } from '../utils/fontManager';
 import { SpreadsheetSheet } from './SpreadsheetSheet';
 import { DownloadSheet } from './DownloadSheet';
 import { FontManagerModal } from './FontManagerModal';
+import { RichTextOverlay } from './RichTextOverlay';
 
-type CanvasHandleType = 'move' | 'nw' | 'ne' | 'se' | 'sw' | 'n' | 's' | 'e' | 'w';
+type CanvasHandleType = 'move' | 'nw' | 'ne' | 'se' | 'sw' | 'e' | 'w';
 
 interface WorkspaceProps {
   project: Project;
@@ -81,12 +95,25 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   // Style Scope Switch: 'this' (current design only) | 'all' (all designs)
   const [styleScope, setStyleScope] = useState<'this' | 'all'>('this');
 
+  // In-Memory Undo / Redo History
+  const [undoStack, setUndoStack] = useState<Project[]>([]);
+  const [redoStack, setRedoStack] = useState<Project[]>([]);
+
+  // Thumbnail Multi-Select Mode
+  const [isSelectMode, setIsSelectMode] = useState<boolean>(false);
+  const [selectedPageIds, setSelectedPageIds] = useState<Set<string>>(new Set());
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState<boolean>(false);
+
+  // Rich Text In-Place Editor state
+  const [editingRichBoxId, setEditingRichBoxId] = useState<string | null>(null);
+  const lastTapRef = useRef<{ time: number; boxId: string | null }>({ time: 0, boxId: null });
+
   // Bottom Sheets & Modals
   const [isSpreadsheetOpen, setIsSpreadsheetOpen] = useState(false);
   const [isDownloadOpen, setIsDownloadOpen] = useState(false);
   const [isFontManagerOpen, setIsFontManagerOpen] = useState(false);
 
-  // Installed Custom Fonts from IndexedDB
+  // Installed Custom Fonts
   const [installedFonts, setInstalledFonts] = useState<StoredFontRecord[]>([]);
 
   // Save Status
@@ -107,17 +134,17 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     imageId: string;
     blob: Blob;
   } | null>(null);
-  const [isLoadingImage, setIsLoadingImage] = useState<boolean>(false);
 
   // Canvas Refs & Dimensions
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const canvasContainerRef = useRef<HTMLDivElement>(null);
+  const rafIdRef = useRef<number | null>(null);
 
   // File Input Refs for Uploads
   const batchUploadRef = useRef<HTMLInputElement>(null);
   const singleUploadRef = useRef<HTMLInputElement>(null);
 
-  // 4-Corner & 8-Way Drag & Resize State
+  // Width Resize & Drag State (automatic height)
   const [activeHandle, setActiveHandle] = useState<CanvasHandleType | null>(null);
   const [dragStart, setDragStart] = useState<{
     mouseX: number;
@@ -125,11 +152,70 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     boxX: number;
     boxY: number;
     boxW: number;
-    boxH: number;
   } | null>(null);
 
   const selectedBox: TextBoxTemplate | undefined =
     activeBoxes.find((b) => b.id === selectedBoxId) || activeBoxes[0];
+
+  // Helper to push history snapshot before mutations
+  const recordHistory = useCallback((projToSave: Project) => {
+    setUndoStack((prev) => [...prev.slice(-30), JSON.parse(JSON.stringify(projToSave))]);
+    setRedoStack([]);
+  }, []);
+
+  // Undo Handler
+  const handleUndo = useCallback(() => {
+    if (undoStack.length === 0) return;
+    const previous = undoStack[undoStack.length - 1];
+    const newUndoStack = undoStack.slice(0, -1);
+    setRedoStack((prev) => [JSON.parse(JSON.stringify(project)), ...prev]);
+    setUndoStack(newUndoStack);
+    onUpdateProject(previous);
+    saveProject(previous).catch(console.error);
+    showToast('Undo');
+  }, [undoStack, project, onUpdateProject]);
+
+  // Redo Handler
+  const handleRedo = useCallback(() => {
+    if (redoStack.length === 0) return;
+    const next = redoStack[0];
+    const newRedoStack = redoStack.slice(1);
+    setUndoStack((prev) => [...prev, JSON.parse(JSON.stringify(project))]);
+    setRedoStack(newRedoStack);
+    onUpdateProject(next);
+    saveProject(next).catch(console.error);
+    showToast('Redo');
+  }, [redoStack, project, onUpdateProject]);
+
+  // Keyboard Shortcuts for Undo & Redo (Cmd+Z / Ctrl+Z / Cmd+Shift+Z / Ctrl+Y)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't trigger if user is typing in input or contenteditable
+      if (
+        document.activeElement?.tagName === 'INPUT' ||
+        document.activeElement?.tagName === 'TEXTAREA' ||
+        (document.activeElement as HTMLElement)?.isContentEditable
+      ) {
+        return;
+      }
+
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
+        if (e.shiftKey) {
+          e.preventDefault();
+          handleRedo();
+        } else {
+          e.preventDefault();
+          handleUndo();
+        }
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleUndo, handleRedo]);
 
   // Keep selectedBoxId valid when active page changes
   useEffect(() => {
@@ -139,11 +225,14 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   }, [activeBoxes, selectedBox]);
 
   // Page Switch Handler: Immediately clears current image to avoid showing stale background
-  const handleSelectPage = useCallback((newIndex: number) => {
-    if (newIndex === activePageIndex) return;
-    setCurrentImageData(null);
-    setActivePageIndex(newIndex);
-  }, [activePageIndex]);
+  const handleSelectPage = useCallback(
+    (newIndex: number) => {
+      if (newIndex === activePageIndex) return;
+      setCurrentImageData(null);
+      setActivePageIndex(newIndex);
+    },
+    [activePageIndex]
+  );
 
   // Load custom fonts on mount
   useEffect(() => {
@@ -159,40 +248,48 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     }
   }, [project.pages.length, activePageIndex]);
 
-  // Load Active Page's Original Image Blob with cancel token and strict ID matching
+  // Load Active Page's Preview Image Blob with cancel token and pre-decode adjacent
   useEffect(() => {
     if (!activePage) {
       setCurrentImageData(null);
-      setIsLoadingImage(false);
       return;
     }
 
     const targetImageId = activePage.imageId;
-    // Clear immediately if imageId doesn't match
     setCurrentImageData((prev) => (prev?.imageId === targetImageId ? prev : null));
-    setIsLoadingImage(true);
 
     let isCancelled = false;
 
-    getOriginalImageBlob(targetImageId)
+    // Use fast ~1200px preview blob for buttery screen editing
+    getPreviewImageBlob(targetImageId)
       .then((blob) => {
         if (!isCancelled && blob) {
           setCurrentImageData({ imageId: targetImageId, blob });
         }
       })
       .catch((err) => {
-        console.error('Failed to load image blob for design:', err);
-      })
-      .finally(() => {
-        if (!isCancelled) {
-          setIsLoadingImage(false);
-        }
+        console.error('Failed to load image preview:', err);
       });
+
+    // Pre-decode adjacent images in the background
+    const prevPage = project.pages[activePageIndex - 1];
+    const nextPage = project.pages[activePageIndex + 1];
+
+    if (prevPage) {
+      getPreviewImageBlob(prevPage.imageId).then((blob) => {
+        if (blob) predecodeImages([{ imageId: prevPage.imageId, blob }]);
+      });
+    }
+    if (nextPage) {
+      getPreviewImageBlob(nextPage.imageId).then((blob) => {
+        if (blob) predecodeImages([{ imageId: nextPage.imageId, blob }]);
+      });
+    }
 
     return () => {
       isCancelled = true;
     };
-  }, [activePage?.id, activePage?.imageId]);
+  }, [activePage?.id, activePage?.imageId, activePageIndex, project.pages]);
 
   // Load Thumbnail URLs for all pages
   useEffect(() => {
@@ -229,7 +326,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     };
   }, []);
 
-  // Debounced Auto-Save to IndexedDB (~600ms)
+  // Debounced Auto-Save to IndexedDB (~500ms)
   const triggerAutoSave = useCallback(
     (updatedProj: Project) => {
       setSaveStatus('saving');
@@ -244,7 +341,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
           console.error('Failed to auto-save:', err);
           setSaveStatus('error');
         }
-      }, 600);
+      }, 500);
     },
     []
   );
@@ -268,10 +365,10 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     setToastMessage(msg);
     setTimeout(() => {
       setToastMessage(null);
-    }, 3000);
+    }, 2500);
   };
 
-  // Render Canvas: Only draw when currentImageData.imageId === activePage.imageId
+  // Coalesced Canvas Redraw with RequestAnimationFrame (Zero flicker)
   const redrawCanvas = useCallback(() => {
     if (
       !canvasRef.current ||
@@ -294,17 +391,28 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       activePage,
       currentImageData.blob,
       {
-        showBoundingBoxes: true,
+        showBoundingBoxes: editingRichBoxId === null, // Hide canvas bounding box when in-place editor is open
         selectedBoxId,
         targetWidth: targetW,
         targetHeight: targetH,
       }
     );
-  }, [activePage, currentImageData, activeBoxes, selectedBoxId]);
+  }, [activePage, currentImageData, activeBoxes, selectedBoxId, editingRichBoxId]);
+
+  const scheduleRedraw = useCallback(() => {
+    if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
+    rafIdRef.current = requestAnimationFrame(() => {
+      redrawCanvas();
+      rafIdRef.current = null;
+    });
+  }, [redrawCanvas]);
 
   useEffect(() => {
-    redrawCanvas();
-  }, [redrawCanvas]);
+    scheduleRedraw();
+    return () => {
+      if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
+    };
+  }, [scheduleRedraw]);
 
   // Handle Updates to Style: This design only vs All designs
   const handleUpdateStyle = (
@@ -312,11 +420,12 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     updates: Partial<TextBoxTemplate>
   ) => {
     if (!activePage) return;
+    recordHistory(project);
+
     const targetBox = activeBoxes.find((b) => b.id === boxId);
     const targetLabel = targetBox?.fieldLabel;
 
     if (styleScope === 'this') {
-      // 1. Update ONLY the active design's text boxes
       const updatedBoxes = activeBoxes.map((b) =>
         b.id === boxId ? { ...b, ...updates } : b
       );
@@ -331,7 +440,6 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       onUpdateProject(updatedProj);
       triggerAutoSave(updatedProj);
     } else {
-      // 2. Update ALL designs matching this fieldLabel, plus project.template
       const updatedTemplate = project.template.map((b) =>
         b.id === boxId || (targetLabel && b.fieldLabel === targetLabel)
           ? { ...b, ...updates }
@@ -361,15 +469,16 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     }
   };
 
-  // Backward compatible alias for style controls
   const handleUpdateTemplateBox = handleUpdateStyle;
 
-  // Dragging/resizing text affects ONLY the current design
+  // Dragging/resizing text affects ONLY the current design (automatic height)
   const handleUpdateCurrentDesignBoxGeometry = (
     boxId: string,
-    geometry: { x: number; y: number; width: number; height: number }
+    geometry: { x: number; y: number; width: number }
   ) => {
     if (!activePage) return;
+    recordHistory(project);
+
     const updatedBoxes = activeBoxes.map((b) =>
       b.id === boxId ? { ...b, ...geometry } : b
     );
@@ -388,6 +497,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   // Copy this design's layout to all designs
   const handleCopyLayoutToAllDesigns = () => {
     if (!activePage) return;
+    recordHistory(project);
     const currentBoxes = activeBoxes;
 
     const updatedPages = project.pages.map((p) => ({
@@ -410,6 +520,8 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   // Handle Updates to Active Page's Text Values
   const handleUpdatePageValue = (fieldLabel: string, newValue: string) => {
     if (!activePage) return;
+    recordHistory(project);
+
     const updatedPages = project.pages.map((p, idx) => {
       if (idx !== activePageIndex) return p;
       return {
@@ -418,8 +530,13 @@ export const Workspace: React.FC<WorkspaceProps> = ({
           ...p.values,
           [fieldLabel]: newValue,
         },
+        richValues: {
+          ...(p.richValues || {}),
+          [fieldLabel]: [{ text: newValue }],
+        },
       };
     });
+
     const updatedProj: Project = {
       ...project,
       pages: updatedPages,
@@ -429,6 +546,85 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     triggerAutoSave(updatedProj);
   };
 
+  // Save Rich Text Runs from In-Place Editor
+  const handleSaveRichText = (runs: TextRun[], plainText: string) => {
+    if (!activePage || !selectedBox) return;
+    recordHistory(project);
+
+    const fieldLabel = selectedBox.fieldLabel;
+    const updatedPages = project.pages.map((p, idx) => {
+      if (idx !== activePageIndex) return p;
+      return {
+        ...p,
+        values: {
+          ...p.values,
+          [fieldLabel]: plainText,
+        },
+        richValues: {
+          ...(p.richValues || {}),
+          [fieldLabel]: runs,
+        },
+      };
+    });
+
+    const updatedProj: Project = {
+      ...project,
+      pages: updatedPages,
+      updatedAt: Date.now(),
+    };
+    onUpdateProject(updatedProj);
+    triggerAutoSave(updatedProj);
+  };
+
+  // "Style this word in all designs" feature
+  const handleStyleWordInAllDesigns = (
+    word: string,
+    styleOverrides: Partial<TextRun>
+  ) => {
+    if (!selectedBox || !word) return;
+    recordHistory(project);
+
+    const fieldLabel = selectedBox.fieldLabel;
+
+    const updatedPages = project.pages.map((p) => {
+      const rawText = p.values[fieldLabel] || '';
+      if (!rawText.includes(word)) return p;
+
+      // Split rawText by word and reconstruct runs
+      const parts = rawText.split(word);
+      const newRuns: TextRun[] = [];
+
+      for (let i = 0; i < parts.length; i++) {
+        if (parts[i]) {
+          newRuns.push({ text: parts[i] });
+        }
+        if (i < parts.length - 1) {
+          newRuns.push({
+            text: word,
+            ...styleOverrides,
+          });
+        }
+      }
+
+      return {
+        ...p,
+        richValues: {
+          ...(p.richValues || {}),
+          [fieldLabel]: newRuns,
+        },
+      };
+    });
+
+    const updatedProj: Project = {
+      ...project,
+      pages: updatedPages,
+      updatedAt: Date.now(),
+    };
+    onUpdateProject(updatedProj);
+    triggerAutoSave(updatedProj);
+    showToast(`Styled "${word}" in all designs`);
+  };
+
   // Add New Field
   const handleAddNewField = (fieldName?: string) => {
     const name =
@@ -436,6 +632,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       prompt('Enter new field label (e.g., Headline, Paragraph 2, Footer):');
     if (!name || !name.trim()) return;
 
+    recordHistory(project);
     const cleanLabel = name.trim();
     const newBox: TextBoxTemplate = {
       id: `tpl_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -443,7 +640,6 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       x: 15,
       y: Math.min(80, 20 + activeBoxes.length * 10),
       width: 70,
-      height: 10,
       fontFamily: 'Plus Jakarta Sans',
       fontSize: 24,
       fontWeight: '500',
@@ -481,6 +677,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       alert('A design must have at least one text field.');
       return;
     }
+    recordHistory(project);
     const targetBox = activeBoxes.find((b) => b.id === boxId);
     const targetLabel = targetBox?.fieldLabel;
 
@@ -523,9 +720,10 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     }
   };
 
-  // Upload Designs: New designs start as a copy of the current design's layout
+  // Upload Designs
   const handleUploadFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
+    recordHistory(project);
 
     const currentLayout = activeBoxes;
     const newPages: DesignPage[] = [];
@@ -555,7 +753,6 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
     let combinedPages = [...project.pages, ...newPages];
 
-    // If spreadsheet was previously loaded, re-apply the stored sheet automatically!
     if (project.lastSpreadsheet) {
       const popResult = populateDesignsFromSpreadsheet(
         combinedPages,
@@ -576,7 +773,28 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     showToast(`${newPages.length} design${newPages.length > 1 ? 's' : ''} added`);
   };
 
-  // Canvas Pointer Events: Touch & 4-Corner / 8-Way Drag & Resize
+  // Multi-Page Deletion in Thumbnail Strip
+  const handleConfirmBatchDeletePages = async () => {
+    if (selectedPageIds.size === 0) return;
+    recordHistory(project);
+
+    try {
+      const updated = await deleteDesignsFromProjectAtomic(
+        project.id,
+        Array.from(selectedPageIds)
+      );
+      onUpdateProject(updated);
+      setSelectedPageIds(new Set());
+      setIsSelectMode(false);
+      setIsDeleteModalOpen(false);
+      showToast('Deleted selected designs and freed storage');
+    } catch (err: any) {
+      console.error('Batch delete error:', err);
+      showToast('Failed to delete selected designs');
+    }
+  };
+
+  // Canvas Pointer Events: Touch & Width Resize / Drag
   const startAction = (
     handle: CanvasHandleType,
     box: TextBoxTemplate,
@@ -590,74 +808,76 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       boxX: box.x,
       boxY: box.y,
       boxW: box.width,
-      boxH: box.height,
     });
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
-    } catch {
-      // safe fallback
-    }
+    } catch {}
   };
 
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!canvasRef.current) return;
+    if (!canvasRef.current || !activePage) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const mousePxX = e.clientX - rect.left;
     const mousePxY = e.clientY - rect.top;
 
-    // 1. If a box is selected, test its 4 corners and 4 edges first!
-    if (selectedBox) {
-      const boxPxX = (selectedBox.x / 100) * rect.width;
-      const boxPxY = (selectedBox.y / 100) * rect.height;
-      const boxPxW = (selectedBox.width / 100) * rect.width;
-      const boxPxH = (selectedBox.height / 100) * rect.height;
+    const ctx = canvasRef.current.getContext('2d');
+    if (!ctx) return;
 
-      // Generous 24px touch hit tolerance for corners and edges on mobile
+    const now = Date.now();
+
+    // 1. If a box is selected, test handles and double-tap detection
+    if (selectedBox) {
+      const layout = computeTextBoxLayout(ctx, selectedBox, activePage, rect.width, rect.height);
+      const boxPxX = layout.boxX;
+      const boxPxY = layout.boxY;
+      const boxPxW = layout.boxW;
+      const boxPxH = layout.computedHeightPx;
+
       const hitRadius = 24;
       const distSq = (x1: number, y1: number, x2: number, y2: number) =>
         (x1 - x2) ** 2 + (y1 - y2) ** 2;
 
-      // 4 Corners:
-      // NW (top-left)
-      if (distSq(mousePxX, mousePxY, boxPxX, boxPxY) <= hitRadius ** 2) {
-        startAction('nw', selectedBox, e);
-        return;
-      }
-      // NE (top-right)
-      if (distSq(mousePxX, mousePxY, boxPxX + boxPxW, boxPxY) <= hitRadius ** 2) {
-        startAction('ne', selectedBox, e);
-        return;
-      }
-      // SE (bottom-right)
-      if (distSq(mousePxX, mousePxY, boxPxX + boxPxW, boxPxY + boxPxH) <= hitRadius ** 2) {
-        startAction('se', selectedBox, e);
-        return;
-      }
-      // SW (bottom-left)
-      if (distSq(mousePxX, mousePxY, boxPxX, boxPxY + boxPxH) <= hitRadius ** 2) {
-        startAction('sw', selectedBox, e);
-        return;
+      // Double-tap inside selected box to enter rich text editor
+      if (
+        mousePxX >= boxPxX &&
+        mousePxX <= boxPxX + boxPxW &&
+        mousePxY >= boxPxY &&
+        mousePxY <= boxPxY + boxPxH
+      ) {
+        if (now - lastTapRef.current.time < 350 && lastTapRef.current.boxId === selectedBox.id) {
+          // Double-tap confirmed!
+          setEditingRichBoxId(selectedBox.id);
+          lastTapRef.current = { time: 0, boxId: null };
+          return;
+        }
+        lastTapRef.current = { time: now, boxId: selectedBox.id };
       }
 
-      // 4 Edge Midpoints:
-      // E (right edge)
-      if (distSq(mousePxX, mousePxY, boxPxX + boxPxW, boxPxY + boxPxH / 2) <= hitRadius ** 2) {
-        startAction('e', selectedBox, e);
-        return;
-      }
-      // W (left edge)
+      // Check Width Midpoint Handles (W and E)
       if (distSq(mousePxX, mousePxY, boxPxX, boxPxY + boxPxH / 2) <= hitRadius ** 2) {
         startAction('w', selectedBox, e);
         return;
       }
-      // S (bottom edge)
-      if (distSq(mousePxX, mousePxY, boxPxX + boxPxW / 2, boxPxY + boxPxH) <= hitRadius ** 2) {
-        startAction('s', selectedBox, e);
+      if (distSq(mousePxX, mousePxY, boxPxX + boxPxW, boxPxY + boxPxH / 2) <= hitRadius ** 2) {
+        startAction('e', selectedBox, e);
         return;
       }
-      // N (top edge)
-      if (distSq(mousePxX, mousePxY, boxPxX + boxPxW / 2, boxPxY) <= hitRadius ** 2) {
-        startAction('n', selectedBox, e);
+
+      // 4 Corners: NW, NE, SE, SW (width & position)
+      if (distSq(mousePxX, mousePxY, boxPxX, boxPxY) <= hitRadius ** 2) {
+        startAction('nw', selectedBox, e);
+        return;
+      }
+      if (distSq(mousePxX, mousePxY, boxPxX + boxPxW, boxPxY) <= hitRadius ** 2) {
+        startAction('ne', selectedBox, e);
+        return;
+      }
+      if (distSq(mousePxX, mousePxY, boxPxX + boxPxW, boxPxY + boxPxH) <= hitRadius ** 2) {
+        startAction('se', selectedBox, e);
+        return;
+      }
+      if (distSq(mousePxX, mousePxY, boxPxX, boxPxY + boxPxH) <= hitRadius ** 2) {
+        startAction('sw', selectedBox, e);
         return;
       }
 
@@ -673,18 +893,17 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       }
     }
 
-    // 2. Otherwise hit-test all active boxes for current design (top-most first)
-    const clickXPercent = (mousePxX / rect.width) * 100;
-    const clickYPercent = (mousePxY / rect.height) * 100;
-
+    // 2. Otherwise hit-test all active boxes (top-most first)
     for (let i = activeBoxes.length - 1; i >= 0; i--) {
       const b = activeBoxes[i];
+      const layout = computeTextBoxLayout(ctx, b, activePage, rect.width, rect.height);
       if (
-        clickXPercent >= b.x &&
-        clickXPercent <= b.x + b.width &&
-        clickYPercent >= b.y &&
-        clickYPercent <= b.y + b.height
+        mousePxX >= layout.boxX &&
+        mousePxX <= layout.boxX + layout.boxW &&
+        mousePxY >= layout.boxY &&
+        mousePxY <= layout.boxY + layout.computedHeightPx
       ) {
+        lastTapRef.current = { time: now, boxId: b.id };
         startAction('move', b, e);
         return;
       }
@@ -702,59 +921,29 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     let newX = dragStart.boxX;
     let newY = dragStart.boxY;
     let newW = dragStart.boxW;
-    let newH = dragStart.boxH;
 
     switch (activeHandle) {
       case 'move':
         newX = Math.max(0, Math.min(100 - dragStart.boxW, Math.round(dragStart.boxX + deltaX)));
-        newY = Math.max(0, Math.min(100 - dragStart.boxH, Math.round(dragStart.boxY + deltaY)));
+        newY = Math.max(0, Math.min(95, Math.round(dragStart.boxY + deltaY)));
         break;
 
-      case 'se': // Bottom-right corner: expand/reduce width and height
-        newW = Math.max(10, Math.min(100 - dragStart.boxX, Math.round(dragStart.boxW + deltaX)));
-        newH = Math.max(4, Math.min(100 - dragStart.boxY, Math.round(dragStart.boxH + deltaY)));
-        break;
-
-      case 'sw': // Bottom-left corner: expand/reduce width and height, adjust X
-        newW = Math.max(10, Math.round(dragStart.boxW - deltaX));
-        newX = Math.max(0, Math.min(dragStart.boxX + dragStart.boxW - 10, Math.round(dragStart.boxX + deltaX)));
-        newH = Math.max(4, Math.min(100 - dragStart.boxY, Math.round(dragStart.boxH + deltaY)));
-        break;
-
-      case 'ne': // Top-right corner: expand/reduce width and height, adjust Y
-        newW = Math.max(10, Math.min(100 - dragStart.boxX, Math.round(dragStart.boxX + deltaX)));
-        newH = Math.max(4, Math.round(dragStart.boxH - deltaY));
-        newY = Math.max(0, Math.min(dragStart.boxY + dragStart.boxH - 4, Math.round(dragStart.boxY + deltaY)));
-        break;
-
-      case 'nw': // Top-left corner: expand/reduce width and height, adjust X and Y
-        newW = Math.max(10, Math.round(dragStart.boxW - deltaX));
-        newX = Math.max(0, Math.min(dragStart.boxX + dragStart.boxW - 10, Math.round(dragStart.boxX + deltaX)));
-        newH = Math.max(4, Math.round(dragStart.boxH - deltaY));
-        newY = Math.max(0, Math.min(dragStart.boxY + dragStart.boxH - 4, Math.round(dragStart.boxY + deltaY)));
-        break;
-
-      case 'e': // Right edge: width
+      case 'e':
+      case 'se':
+      case 'ne':
         newW = Math.max(10, Math.min(100 - dragStart.boxX, Math.round(dragStart.boxW + deltaX)));
         break;
 
-      case 'w': // Left edge: x and width
+      case 'w':
+      case 'sw':
+      case 'nw':
         newW = Math.max(10, Math.round(dragStart.boxW - deltaX));
         newX = Math.max(0, Math.min(dragStart.boxX + dragStart.boxW - 10, Math.round(dragStart.boxX + deltaX)));
-        break;
-
-      case 's': // Bottom edge: height
-        newH = Math.max(4, Math.min(100 - dragStart.boxY, Math.round(dragStart.boxH + deltaY)));
-        break;
-
-      case 'n': // Top edge: y and height
-        newH = Math.max(4, Math.round(dragStart.boxH - deltaY));
-        newY = Math.max(0, Math.min(dragStart.boxY + dragStart.boxH - 4, Math.round(dragStart.boxY + deltaY)));
         break;
     }
 
-    // Dragging/resizing text affects ONLY the current design
-    handleUpdateCurrentDesignBoxGeometry(selectedBoxId, { x: newX, y: newY, width: newW, height: newH });
+    // Update geometry on active design
+    handleUpdateCurrentDesignBoxGeometry(selectedBoxId, { x: newX, y: newY, width: newW });
   };
 
   const handleCanvasPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -763,17 +952,37 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       setDragStart(null);
       try {
         canvasRef.current?.releasePointerCapture(e.pointerId);
-      } catch {
-        // safe fallback
-      }
+      } catch {}
     }
   };
 
+  // Get active editing box layout for in-place rich text overlay
+  const getEditingBoxLayout = () => {
+    if (!editingRichBoxId || !canvasRef.current || !activePage) return null;
+    const targetBox = activeBoxes.find((b) => b.id === editingRichBoxId);
+    if (!targetBox) return null;
+
+    const rect = canvasRef.current.getBoundingClientRect();
+    const ctx = canvasRef.current.getContext('2d');
+    if (!ctx) return null;
+
+    const layout = computeTextBoxLayout(ctx, targetBox, activePage, rect.width, rect.height);
+    return {
+      box: targetBox,
+      scale: rect.width / 1000,
+      boxX: layout.boxX,
+      boxY: layout.boxY,
+      boxW: layout.boxW,
+      boxH: layout.computedHeightPx,
+    };
+  };
+
+  const editingLayout = getEditingBoxLayout();
 
   return (
-    <div className="min-h-screen bg-[#0B0B0F] text-[#FFF8E7] flex flex-col font-sans select-none pb-28">
+    <div className="h-[100dvh] bg-[#0B0B0F] text-[#FFF8E7] flex flex-col font-sans select-none overflow-hidden overscroll-none">
       {/* 1. TOP APP BAR */}
-      <header className="border-b border-[#212128] bg-[#121217]/95 backdrop-blur-md sticky top-0 z-30 px-3 sm:px-6 py-2.5 flex items-center justify-between gap-3">
+      <header className="border-b border-[#212128] bg-[#121217]/95 backdrop-blur-md shrink-0 z-30 px-3 sm:px-6 py-2.5 flex items-center justify-between gap-3">
         {/* Left: Back & Project Title */}
         <div className="flex items-center gap-2.5 min-w-0">
           <button
@@ -792,7 +1001,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                 onUpdateProject(updated);
                 triggerAutoSave(updated);
               }}
-              className="bg-transparent font-serif font-bold text-sm sm:text-base text-[#FFF8E7] focus:outline-none focus:border-b focus:border-[#D4AF37] truncate max-w-[150px] sm:max-w-xs"
+              className="bg-transparent font-serif font-bold text-sm sm:text-base text-[#FFF8E7] focus:outline-none focus:border-b focus:border-[#D4AF37] truncate max-w-[140px] sm:max-w-xs"
             />
             <div className="flex items-center gap-1.5 text-[10px]">
               <span
@@ -809,10 +1018,30 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                   ? 'Saved'
                   : saveStatus === 'saving'
                   ? 'Saving…'
-                  : 'Not saved – tap to retry'}
+                  : 'Not saved'}
               </span>
             </div>
           </div>
+        </div>
+
+        {/* Center: In-Memory Undo / Redo */}
+        <div className="flex items-center gap-1 bg-[#17171C] border border-[#2D2D38] p-1 rounded-xl">
+          <button
+            onClick={handleUndo}
+            disabled={undoStack.length === 0}
+            className="p-1.5 rounded-lg text-[#FFF8E7]/70 hover:text-white hover:bg-[#262632] disabled:opacity-30 transition-all min-h-[36px] min-w-[36px] flex items-center justify-center"
+            title="Undo (Ctrl+Z)"
+          >
+            <Undo2 className="w-4 h-4" />
+          </button>
+          <button
+            onClick={handleRedo}
+            disabled={redoStack.length === 0}
+            className="p-1.5 rounded-lg text-[#FFF8E7]/70 hover:text-white hover:bg-[#262632] disabled:opacity-30 transition-all min-h-[36px] min-w-[36px] flex items-center justify-center"
+            title="Redo (Ctrl+Y)"
+          >
+            <Redo2 className="w-4 h-4" />
+          </button>
         </div>
 
         {/* Right: Spreadsheet & Download Triggers */}
@@ -843,9 +1072,9 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       )}
 
       {/* 2. MAIN WORKSPACE BODY */}
-      <div className="flex-1 flex flex-col lg:flex-row max-w-7xl w-full mx-auto p-2 sm:p-4 gap-4">
+      <div className="flex-1 flex flex-col lg:flex-row max-w-7xl w-full mx-auto p-2 sm:p-4 gap-4 overflow-y-auto pb-24">
         {/* Left / Center Area: Canvas & Pagination */}
-        <div className="flex-1 flex flex-col items-center justify-start space-y-3 min-w-0">
+        <div className="flex-1 flex flex-col items-center justify-start space-y-2.5 min-w-0">
           {/* Pagination Controls */}
           {project.pages.length > 0 && (
             <div className="flex items-center justify-between w-full max-w-lg px-2">
@@ -857,9 +1086,14 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                 <ChevronLeft className="w-4 h-4" />
               </button>
 
-              <span className="text-xs font-mono font-bold text-[#D4AF37]">
-                Design {activePageIndex + 1} of {project.pages.length}
-              </span>
+              <div className="flex flex-col items-center">
+                <span className="text-xs font-mono font-bold text-[#D4AF37]">
+                  Design {activePageIndex + 1} of {project.pages.length}
+                </span>
+                <span className="text-[10px] text-[#FFF8E7]/40 truncate max-w-[180px]">
+                  {activePage ? activePage.name : ''}
+                </span>
+              </div>
 
               <button
                 onClick={() =>
@@ -875,10 +1109,10 @@ export const Workspace: React.FC<WorkspaceProps> = ({
             </div>
           )}
 
-          {/* Interactive Canvas Container */}
+          {/* Interactive Canvas Container with Auto-Height Box Layout */}
           <div
             ref={canvasContainerRef}
-            className="w-full max-w-lg bg-[#121217] border border-[#262632] rounded-2xl overflow-hidden shadow-2xl relative flex items-center justify-center min-h-[340px]"
+            className="w-full max-w-lg bg-[#121217] border border-[#262632] rounded-2xl overflow-hidden shadow-2xl relative flex items-center justify-center min-h-[320px]"
           >
             {project.pages.length === 0 ? (
               <div className="p-8 text-center space-y-3">
@@ -914,13 +1148,28 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                   style={{ touchAction: 'none' }}
                   className="cursor-move max-w-full h-auto rounded-xl shadow-lg"
                 />
+
+                {/* Double-tap in-place rich text editor overlay */}
+                {editingLayout && (
+                  <RichTextOverlay
+                    box={editingLayout.box}
+                    page={activePage}
+                    scale={editingLayout.scale}
+                    boxX={editingLayout.boxX}
+                    boxY={editingLayout.boxY}
+                    boxW={editingLayout.boxW}
+                    boxH={editingLayout.boxH}
+                    onSave={handleSaveRichText}
+                    onStyleWordInAllDesigns={handleStyleWordInAllDesigns}
+                    onClose={() => setEditingRichBoxId(null)}
+                  />
+                )}
               </div>
             )}
           </div>
         </div>
 
-        {/* Right Area: Text Field Editors & Shared Template Style Panel */}
-        {/* On Desktop: Side by Side; On Mobile: Docked Bottom Drawer */}
+        {/* Right Area: Text Field Editors & Style Panel */}
         <div className="w-full lg:w-96 flex flex-col gap-3">
           {/* Mobile Tab Switcher */}
           <div className="flex lg:hidden bg-[#17171C] p-1 rounded-xl border border-[#262632]">
@@ -986,19 +1235,33 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                     <span className="text-[10px] font-mono font-bold text-[#D4AF37] uppercase">
                       {box.fieldLabel}
                     </span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDeleteField(box.id);
-                      }}
-                      className="text-[#FFF8E7]/30 hover:text-red-400 p-1"
-                      title="Delete Field"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedBoxId(box.id);
+                          setEditingRichBoxId(box.id);
+                        }}
+                        className="text-[#D4AF37]/80 hover:text-[#D4AF37] text-[10px] font-semibold flex items-center gap-1 p-1 rounded hover:bg-[#2D2D3A]"
+                        title="Double-tap box on canvas or click here to format words"
+                      >
+                        <Edit3 className="w-3 h-3" />
+                        <span>Format Words</span>
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteField(box.id);
+                        }}
+                        className="text-[#FFF8E7]/30 hover:text-red-400 p-1"
+                        title="Delete Field"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
                   <textarea
-                    rows={box.height > 12 ? 2 : 1}
+                    rows={2}
                     value={val}
                     placeholder={`Enter ${box.fieldLabel} text…`}
                     onChange={(e) =>
@@ -1027,10 +1290,10 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                 </span>
               </div>
 
-              {/* Style Scope Switch (Canva-style: This design only vs All designs) */}
+              {/* Style Scope Switch (This design only vs All designs) */}
               <div className="bg-[#121217] p-1.5 rounded-xl border border-[#2D2D38] space-y-1.5">
                 <div className="flex items-center justify-between px-1">
-                  <span className="text-[11px] font-semibold text-[#D4AF37]">Apply Changes To:</span>
+                  <span className="text-[11px] font-semibold text-[#D4AF37]">Apply Style Changes To:</span>
                   <span className="text-[10px] text-[#FFF8E7]/50 font-mono">
                     {styleScope === 'this'
                       ? 'This design only'
@@ -1070,7 +1333,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                 type="button"
                 onClick={handleCopyLayoutToAllDesigns}
                 className="w-full bg-[#1C1C24] hover:bg-[#262632] border border-[#D4AF37]/40 hover:border-[#D4AF37] text-[#D4AF37] text-xs font-semibold py-2.5 px-3 rounded-xl flex items-center justify-center gap-2 transition-all min-h-[42px]"
-                title="Copy box positions, sizes, and styles from this design to all other designs"
+                title="Copy box positions, widths, and styles from this design to all other designs"
               >
                 <Copy className="w-3.5 h-3.5" />
                 <span>Copy this design's layout to all designs</span>
@@ -1085,7 +1348,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                     className="text-xs text-[#D4AF37] hover:text-[#F4D58D] font-bold flex items-center gap-1 bg-[#21212A] hover:bg-[#2B2B38] px-2.5 py-1 rounded-lg border border-[#333342] transition-colors"
                   >
                     <Type className="w-3 h-3 text-[#D4AF37]" />
-                    <span>Manage Fonts (.ttf/.otf)</span>
+                    <span>Global Font Library</span>
                   </button>
                 </div>
                 <select
@@ -1114,8 +1377,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                 </select>
               </div>
 
-
-              {/* 2. Font Size Stepper (Canva-style [-] [48px] [+]) */}
+              {/* 2. Font Size Stepper */}
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[11px] text-[#FFF8E7]/70">Font Size (1000px base)</span>
                 <div className="flex items-center bg-[#121217] border border-[#333342] rounded-xl overflow-hidden">
@@ -1125,7 +1387,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                         fontSize: Math.max(10, selectedBox.fontSize - 2),
                       })
                     }
-                    className="px-2.5 py-1.5 text-[#FFF8E7]/70 hover:text-white hover:bg-[#212128] transition-colors"
+                    className="px-2.5 py-1.5 text-[#FFF8E7]/70 hover:text-white hover:bg-[#212128] transition-colors min-h-[36px]"
                   >
                     <Minus className="w-3 h-3" />
                   </button>
@@ -1145,7 +1407,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                         fontSize: Math.min(180, selectedBox.fontSize + 2),
                       })
                     }
-                    className="px-2.5 py-1.5 text-[#FFF8E7]/70 hover:text-white hover:bg-[#212128] transition-colors"
+                    className="px-2.5 py-1.5 text-[#FFF8E7]/70 hover:text-white hover:bg-[#212128] transition-colors min-h-[36px]"
                   >
                     <Plus className="w-3 h-3" />
                   </button>
@@ -1239,11 +1501,15 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                 </div>
               </div>
 
-              {/* 5. Box Dimensions: Easily Manipulatable Width & Height */}
+              {/* 5. Automatic Height Box: Only Width Slider & Quick Presets */}
               <div className="space-y-2.5 pt-1 border-t border-[#262632]">
                 <div className="flex items-center justify-between text-[11px]">
-                  <span className="font-semibold text-[#D4AF37]">Box Width (Length): {selectedBox.width}%</span>
-                  <span className="text-[10px] text-[#FFF8E7]/40">4-Corner expandable</span>
+                  <span className="font-semibold text-[#D4AF37]">
+                    Box Width: {selectedBox.width}%
+                  </span>
+                  <span className="text-[10px] text-emerald-400 font-mono">
+                    Height is automatic (fits text)
+                  </span>
                 </div>
 
                 {/* Width Slider + Steppers */}
@@ -1254,7 +1520,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                         width: Math.max(10, selectedBox.width - 5),
                       })
                     }
-                    className="p-1.5 rounded-lg bg-[#121217] border border-[#333342] text-[#FFF8E7]/70 hover:text-white hover:bg-[#212128] transition-colors"
+                    className="p-1.5 rounded-lg bg-[#121217] border border-[#333342] text-[#FFF8E7]/70 hover:text-white hover:bg-[#212128] transition-colors min-h-[36px]"
                     title="Narrow width"
                   >
                     <Minus className="w-3.5 h-3.5" />
@@ -1279,7 +1545,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                         width: Math.min(100 - selectedBox.x, selectedBox.width + 5),
                       })
                     }
-                    className="p-1.5 rounded-lg bg-[#121217] border border-[#333342] text-[#FFF8E7]/70 hover:text-white hover:bg-[#212128] transition-colors"
+                    className="p-1.5 rounded-lg bg-[#121217] border border-[#333342] text-[#FFF8E7]/70 hover:text-white hover:bg-[#212128] transition-colors min-h-[36px]"
                     title="Widen width"
                   >
                     <Plus className="w-3.5 h-3.5" />
@@ -1296,7 +1562,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                           width: Math.min(100 - selectedBox.x, w),
                         })
                       }
-                      className={`flex-1 py-1 text-[10px] font-mono font-semibold rounded-lg border transition-all ${
+                      className={`flex-1 py-1.5 text-[10px] font-mono font-semibold rounded-lg border transition-all min-h-[32px] ${
                         selectedBox.width === w
                           ? 'bg-[#D4AF37] text-[#0B0B0F] border-[#D4AF37]'
                           : 'bg-[#121217] text-[#FFF8E7]/60 border-[#262632] hover:text-[#FFF8E7]'
@@ -1307,64 +1573,17 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                   ))}
                 </div>
 
-                {/* Height (Length) Slider + Steppers */}
-                <div className="pt-2">
-                  <div className="flex items-center justify-between text-[11px] mb-1.5">
-                    <span className="font-semibold text-[#D4AF37]">Box Height: {selectedBox.height}%</span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() =>
-                        handleUpdateTemplateBox(selectedBox.id, {
-                          height: Math.max(4, selectedBox.height - 2),
-                        })
-                      }
-                      className="p-1.5 rounded-lg bg-[#121217] border border-[#333342] text-[#FFF8E7]/70 hover:text-white hover:bg-[#212128] transition-colors"
-                      title="Reduce height"
-                    >
-                      <Minus className="w-3.5 h-3.5" />
-                    </button>
-
-                    <input
-                      type="range"
-                      min="4"
-                      max={100 - selectedBox.y}
-                      value={selectedBox.height}
-                      onChange={(e) =>
-                        handleUpdateTemplateBox(selectedBox.id, {
-                          height: parseInt(e.target.value, 10),
-                        })
-                      }
-                      className="flex-1 accent-[#D4AF37] h-1.5 bg-[#121217] rounded-lg cursor-pointer"
-                    />
-
-                    <button
-                      onClick={() =>
-                        handleUpdateTemplateBox(selectedBox.id, {
-                          height: Math.min(100 - selectedBox.y, selectedBox.height + 2),
-                        })
-                      }
-                      className="p-1.5 rounded-lg bg-[#121217] border border-[#333342] text-[#FFF8E7]/70 hover:text-white hover:bg-[#212128] transition-colors"
-                      title="Expand height"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
+                <div className="p-2 bg-[#121217] rounded-xl border border-[#262632] text-[10px] text-[#FFF8E7]/50 leading-relaxed">
+                  💡 <strong>Tip:</strong> Double-tap any box on the canvas to open the rich-text editor and style individual words!
                 </div>
-
-                <p className="text-[10px] text-[#FFF8E7]/40 pt-1 leading-relaxed">
-                  💡 Tip: Drag directly on any of the 4 white-gold corner handles on the canvas to expand or shrink the text box freely.
-                </p>
               </div>
-
             </div>
           )}
         </div>
       </div>
 
-      {/* 3. ALWAYS-VISIBLE HORIZONTALLY SCROLLABLE THUMBNAIL STRIP AT BOTTOM */}
-      <div className="fixed bottom-0 left-0 right-0 z-40 bg-[#121217]/95 backdrop-blur-md border-t border-[#262632] px-3 py-2 flex items-center gap-3 overflow-x-auto">
+      {/* 3. ALWAYS-VISIBLE THUMBNAIL STRIP WITH MULTI-PAGE SELECTION */}
+      <div className="fixed bottom-0 left-0 right-0 z-40 bg-[#121217]/95 backdrop-blur-md border-t border-[#262632] px-3 py-2 flex items-center gap-2.5 overflow-x-auto">
         {/* Upload Buttons */}
         <div className="flex items-center gap-1.5 shrink-0">
           <input
@@ -1377,11 +1596,11 @@ export const Workspace: React.FC<WorkspaceProps> = ({
           />
           <button
             onClick={() => batchUploadRef.current?.click()}
-            className="bg-[#D4AF37] hover:bg-[#F4D58D] text-[#0B0B0F] font-bold text-xs px-3 py-2.5 rounded-xl flex items-center gap-1.5 shadow-md shadow-[#D4AF37]/20 transition-all min-h-[44px] shrink-0"
+            className="bg-[#D4AF37] hover:bg-[#F4D58D] text-[#0B0B0F] font-bold text-xs px-3 py-2 rounded-xl flex items-center gap-1.5 shadow-md shadow-[#D4AF37]/20 transition-all min-h-[44px] shrink-0"
             title="Batch Upload (many designs)"
           >
             <Upload className="w-3.5 h-3.5" />
-            <span className="whitespace-nowrap">Batch upload</span>
+            <span className="whitespace-nowrap">Batch</span>
           </button>
 
           <input
@@ -1393,7 +1612,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
           />
           <button
             onClick={() => singleUploadRef.current?.click()}
-            className="bg-[#1C1C24] hover:bg-[#262632] border border-[#333342] text-[#FFF8E7] text-xs font-semibold px-2.5 py-2.5 rounded-xl flex items-center gap-1 transition-all min-h-[44px] shrink-0"
+            className="bg-[#1C1C24] hover:bg-[#262632] border border-[#333342] text-[#FFF8E7] text-xs font-semibold px-2.5 py-2 rounded-xl flex items-center gap-1 transition-all min-h-[44px] shrink-0"
             title="Single Upload"
           >
             <Plus className="w-3.5 h-3.5 text-[#D4AF37]" />
@@ -1403,42 +1622,153 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
         <div className="h-8 w-px bg-[#262632] shrink-0" />
 
+        {/* Multi-Select Toolbar Trigger */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {!isSelectMode ? (
+            <button
+              onClick={() => setIsSelectMode(true)}
+              className="px-2.5 py-2 bg-[#1C1C24] hover:bg-[#262632] border border-[#333342] text-xs font-semibold text-[#FFF8E7]/80 rounded-xl flex items-center gap-1 min-h-[44px]"
+              title="Select multiple designs to delete"
+            >
+              <CheckSquare className="w-3.5 h-3.5 text-[#D4AF37]" />
+              <span className="hidden sm:inline">Select</span>
+            </button>
+          ) : (
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => {
+                  if (selectedPageIds.size === project.pages.length) {
+                    setSelectedPageIds(new Set());
+                  } else {
+                    setSelectedPageIds(new Set(project.pages.map((p) => p.id)));
+                  }
+                }}
+                className="px-2 py-1.5 bg-[#21212A] text-[11px] font-semibold text-[#FFF8E7] rounded-lg border border-[#333342] min-h-[38px]"
+              >
+                {selectedPageIds.size === project.pages.length ? 'Deselect' : 'All'}
+              </button>
+
+              {selectedPageIds.size > 0 && (
+                <button
+                  onClick={() => setIsDeleteModalOpen(true)}
+                  className="px-2.5 py-1.5 bg-red-500 hover:bg-red-600 text-white text-xs font-bold rounded-lg flex items-center gap-1 min-h-[38px] shadow-md shadow-red-500/20"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Delete ({selectedPageIds.size})</span>
+                </button>
+              )}
+
+              <button
+                onClick={() => {
+                  setIsSelectMode(false);
+                  setSelectedPageIds(new Set());
+                }}
+                className="px-2 py-1.5 text-xs text-[#FFF8E7]/60 hover:text-white min-h-[38px]"
+              >
+                Done
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="h-8 w-px bg-[#262632] shrink-0" />
+
         {/* Thumbnails Carousel */}
         <div className="flex items-center gap-2 overflow-x-auto py-1">
           {project.pages.map((page, idx) => {
             const isActive = idx === activePageIndex;
             const thumbUrl = thumbnailUrls[page.id];
+            const isChecked = selectedPageIds.has(page.id);
 
             return (
-              <button
+              <div
                 key={page.id}
-                onClick={() => handleSelectPage(idx)}
-                className={`relative shrink-0 rounded-xl overflow-hidden border-2 transition-all min-h-[44px] ${
-                  isActive
+                onClick={() => {
+                  if (isSelectMode) {
+                    setSelectedPageIds((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(page.id)) next.delete(page.id);
+                      else next.add(page.id);
+                      return next;
+                    });
+                  } else {
+                    handleSelectPage(idx);
+                  }
+                }}
+                className={`relative shrink-0 rounded-xl overflow-hidden border-2 cursor-pointer transition-all min-h-[44px] ${
+                  isChecked
+                    ? 'border-red-500 ring-2 ring-red-500/40'
+                    : isActive
                     ? 'border-[#D4AF37] ring-2 ring-[#D4AF37]/30 scale-105'
-                    : 'border-[#262632] opacity-70 hover:opacity-100'
+                    : 'border-[#262632] opacity-75 hover:opacity-100'
                 }`}
-                style={{ width: '64px', height: '64px' }}
+                style={{ width: '60px', height: '60px' }}
               >
                 {thumbUrl ? (
                   <img
                     src={thumbUrl}
                     alt={page.name}
                     className="w-full h-full object-cover"
+                    loading="lazy"
                   />
                 ) : (
                   <div className="w-full h-full bg-[#1A1A24] flex items-center justify-center text-[10px] text-[#FFF8E7]/40">
                     #{idx + 1}
                   </div>
                 )}
-                <span className="absolute bottom-0.5 right-1 text-[9px] font-mono font-bold bg-black/70 px-1 rounded text-white">
+
+                {/* Index badge */}
+                <span className="absolute bottom-0.5 right-1 text-[9px] font-mono font-bold bg-black/75 px-1 rounded text-white">
                   {idx + 1}
                 </span>
-              </button>
+
+                {/* Multi-select checkbox indicator */}
+                {isSelectMode && (
+                  <div className="absolute top-1 left-1">
+                    {isChecked ? (
+                      <CheckSquare className="w-4 h-4 text-red-500 fill-white" />
+                    ) : (
+                      <Square className="w-4 h-4 text-white/80" />
+                    )}
+                  </div>
+                )}
+              </div>
             );
           })}
         </div>
       </div>
+
+      {/* Multi-Page Delete Confirmation Modal */}
+      {isDeleteModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#17171C] border border-[#333342] rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl animate-in zoom-in-95">
+            <div className="flex items-center gap-3 text-red-400">
+              <AlertTriangle className="w-6 h-6 shrink-0" />
+              <h3 className="text-base font-bold text-[#FFF8E7]">
+                Delete {selectedPageIds.size} Design{selectedPageIds.size > 1 ? 's' : ''}?
+              </h3>
+            </div>
+            <p className="text-xs text-[#FFF8E7]/70 leading-relaxed">
+              These designs and their unused background images will be permanently removed from
+              browser storage to free up space.
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                onClick={() => setIsDeleteModalOpen(false)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-[#FFF8E7]/70 hover:bg-[#212128] transition-colors min-h-[44px]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmBatchDeletePages}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-red-500 hover:bg-red-600 text-white shadow-lg shadow-red-500/20 transition-all min-h-[44px]"
+              >
+                Delete & Free Space
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Spreadsheet Bottom Sheet */}
       <SpreadsheetSheet
@@ -1446,6 +1776,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         isOpen={isSpreadsheetOpen}
         onClose={() => setIsSpreadsheetOpen(false)}
         onUpdateProject={(updated) => {
+          recordHistory(project);
           onUpdateProject(updated);
           triggerAutoSave(updated);
         }}
@@ -1473,4 +1804,3 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     </div>
   );
 };
-

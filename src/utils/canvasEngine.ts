@@ -1,33 +1,57 @@
 /**
  * Litdom Batch Studio - Canvas Rendering Engine
  * Shared 1:1 renderer for screen-resolution preview and full-resolution export.
- * Scales typography from 1000px baseline, explicitly preloads fonts,
- * caches decoded background images, and renders with precise letterSpacing and styling.
+ * - Automatic box height fitting wrapped text (like Canva).
+ * - Mixed rich-text runs (mixed fonts, sizes, bold, italic, underline, strike, effects).
+ * - LRU cache keeping at most 5 decoded images in memory.
+ * - Proportional typography scaling from 1000px baseline.
  */
 
-import { TextBoxTemplate, DesignPage } from '../types';
-import { ensureFontLoaded } from './fontManager';
+import { TextBoxTemplate, DesignPage, TextRun, TextRunEffect } from '../types';
+import { ensureFontLoaded, BUILTIN_GOOGLE_FONTS } from './fontManager';
 
 export interface BuiltinFont {
   name: string;
-  category: 'Serif' | 'Sans' | 'Display' | 'Mono';
+  category: 'Serif' | 'Sans' | 'Display' | 'Mono' | 'Handwriting';
 }
 
-export const BUILTIN_FONTS: BuiltinFont[] = [
-  { name: 'Plus Jakarta Sans', category: 'Sans' },
-  { name: 'Cinzel', category: 'Display' },
-  { name: 'Montserrat', category: 'Sans' },
-  { name: 'Playfair Display', category: 'Serif' },
-  { name: 'DM Sans', category: 'Sans' },
-  { name: 'Outfit', category: 'Sans' },
-  { name: 'Manrope', category: 'Sans' },
-  { name: 'Cormorant Garamond', category: 'Serif' },
-  { name: 'Oswald', category: 'Display' },
-  { name: 'JetBrains Mono', category: 'Mono' },
-];
+export const BUILTIN_FONTS: BuiltinFont[] = BUILTIN_GOOGLE_FONTS.map((f) => ({
+  name: f.name,
+  category: f.category,
+}));
 
-// Decoded Image Cache for 60fps interaction during dragging
-const decodedImageCache = new Map<string, HTMLImageElement>();
+// LRU Decoded Image Cache: Keep at most 5 decoded images in memory
+class DecodedImageLRU {
+  private cache = new Map<string, HTMLImageElement>();
+  private readonly maxLimit = 5;
+
+  get(key: string): HTMLImageElement | undefined {
+    const item = this.cache.get(key);
+    if (item) {
+      this.cache.delete(key);
+      this.cache.set(key, item);
+    }
+    return item;
+  }
+
+  set(key: string, img: HTMLImageElement): void {
+    if (this.cache.has(key)) {
+      this.cache.delete(key);
+    } else if (this.cache.size >= this.maxLimit) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey) {
+        this.cache.delete(oldestKey);
+      }
+    }
+    this.cache.set(key, img);
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+}
+
+const decodedImageCache = new DecodedImageLRU();
 
 export async function getOrLoadDecodedImage(
   cacheKey: string,
@@ -66,67 +90,282 @@ export function clearDecodedImageCache(): void {
 }
 
 /**
- * Explicitly await document.fonts.load for all fonts used in the template
+ * Pre-decode adjacent images in the background (max 5 kept in memory)
  */
-export async function preloadTemplateFonts(template: TextBoxTemplate[]): Promise<void> {
+export async function predecodeImages(
+  entries: { imageId: string; blob: Blob }[]
+): Promise<void> {
+  for (const entry of entries) {
+    try {
+      await getOrLoadDecodedImage(entry.imageId, entry.blob);
+    } catch {
+      // non-blocking
+    }
+  }
+}
+
+/**
+ * Explicitly await document.fonts.load for all fonts used in the template or runs
+ */
+export async function preloadTemplateFonts(
+  template: TextBoxTemplate[],
+  richValues?: Record<string, TextRun[]>
+): Promise<void> {
   if (typeof document === 'undefined' || !document.fonts) return;
 
-  const loadPromises = template.map(async (box) => {
+  const fontFamilies = new Set<string>();
+
+  for (const box of template) {
+    if (box.fontFamily) fontFamilies.add(box.fontFamily);
+  }
+
+  if (richValues) {
+    for (const runs of Object.values(richValues)) {
+      if (Array.isArray(runs)) {
+        for (const r of runs) {
+          if (r.fontFamily) fontFamilies.add(r.fontFamily);
+        }
+      }
+    }
+  }
+
+  const loadPromises = Array.from(fontFamilies).map(async (fontFamily) => {
     try {
-      await ensureFontLoaded(box.fontFamily);
-      const style = box.fontStyle || 'normal';
-      const weight = box.fontWeight || '400';
-      const fontSpec = `${style} ${weight} 32px "${box.fontFamily}"`;
-      await document.fonts.load(fontSpec);
+      await ensureFontLoaded(fontFamily);
+      await document.fonts.load(`32px "${fontFamily}"`);
     } catch {
-      // safe fallback if offline or local font loading
+      // safe fallback
     }
   });
 
   await Promise.all(loadPromises);
 }
 
+/**
+ * Single Word/Token for mixed-run layout
+ */
+export interface LayoutToken {
+  text: string;
+  isWhitespace: boolean;
+  isNewline: boolean;
+  width: number;
+  fontFamily: string;
+  fontSize: number;
+  fontWeight: string;
+  fontStyle: string;
+  color: string;
+  letterSpacing: number;
+  underline: boolean;
+  strike: boolean;
+  effects?: TextRunEffect;
+}
+
+export interface LayoutLine {
+  tokens: LayoutToken[];
+  width: number;
+  height: number;
+  maxFontSize: number;
+}
+
+export interface ComputedLayoutResult {
+  lines: LayoutLine[];
+  computedHeightPx: number;
+  computedHeightPercent: number;
+  boxX: number;
+  boxY: number;
+  boxW: number;
+  scaledPadding: number;
+}
 
 /**
- * Word wrap helper calculating line segments within maxWidth
+ * Split text runs into tokens with inheritance from base box
  */
-function wrapText(
-  ctx: CanvasRenderingContext2D,
-  text: string,
-  maxWidth: number
-): string[] {
-  if (!text) return [];
+function tokenizeRuns(
+  runs: TextRun[],
+  box: TextBoxTemplate,
+  scale: number,
+  ctx?: CanvasRenderingContext2D | null
+): LayoutToken[] {
+  const tokens: LayoutToken[] = [];
 
-  const paragraphs = text.split('\n');
-  const lines: string[] = [];
+  for (const run of runs) {
+    const rawText = run.text;
+    if (!rawText) continue;
 
-  for (const para of paragraphs) {
-    if (para.trim() === '') {
-      lines.push('');
-      continue;
+    const fontFamily = run.fontFamily || box.fontFamily || 'Plus Jakarta Sans';
+    const baseFontSize = run.fontSize !== undefined ? run.fontSize : box.fontSize;
+    const fontSize = Math.max(6, Math.round(baseFontSize * scale));
+
+    const isBold = run.bold !== undefined ? run.bold : (box.fontWeight === '700' || box.fontWeight === '800');
+    const fontWeight = isBold ? '700' : (box.fontWeight || '400');
+
+    const isItalic = run.italic !== undefined ? run.italic : box.fontStyle === 'italic';
+    const fontStyle = isItalic ? 'italic' : 'normal';
+
+    const color = run.color || box.color || '#FFF8E7';
+    const baseLetterSpacing = run.letterSpacing !== undefined ? run.letterSpacing : (box.letterSpacing || 0);
+    const letterSpacing = baseLetterSpacing * scale;
+
+    const underline = !!run.underline;
+    const strike = !!run.strike;
+
+    const effects: TextRunEffect | undefined = run.effects || (box.shadow || box.stroke ? {
+      shadow: box.shadow ? { enabled: true, ...box.shadow } : undefined,
+      outline: box.stroke ? { enabled: true, ...box.stroke } : undefined,
+    } : undefined);
+
+    // Apply font to context to measure accurately
+    if (ctx) {
+      ctx.font = `${fontStyle} ${fontWeight} ${fontSize}px "${fontFamily}", sans-serif`;
     }
 
-    const words = para.split(/\s+/);
-    let currentLine = '';
+    // Split text into words, spaces, and explicit newlines
+    const regex = /(\r\n|\r|\n|[^\S\r\n]+|[^\s]+)/g;
+    let match: RegExpExecArray | null;
 
-    for (let i = 0; i < words.length; i++) {
-      const word = words[i];
-      const testLine = currentLine ? `${currentLine} ${word}` : word;
-      const testWidth = ctx.measureText(testLine).width;
+    while ((match = regex.exec(rawText)) !== null) {
+      const part = match[0];
+      const isNewline = part === '\n' || part === '\r\n' || part === '\r';
+      const isWhitespace = /^[^\S\r\n]+$/.test(part);
 
-      if (testWidth > maxWidth && currentLine) {
-        lines.push(currentLine);
-        currentLine = word;
-      } else {
-        currentLine = testLine;
+      let width = 0;
+      if (!isNewline) {
+        width = ctx ? ctx.measureText(part).width : part.length * (fontSize * 0.55);
+        if (letterSpacing && part.length > 1) {
+          width += (part.length - 1) * letterSpacing;
+        }
       }
-    }
-    if (currentLine) {
-      lines.push(currentLine);
+
+      tokens.push({
+        text: part,
+        isWhitespace,
+        isNewline,
+        width,
+        fontFamily,
+        fontSize,
+        fontWeight,
+        fontStyle,
+        color,
+        letterSpacing,
+        underline,
+        strike,
+        effects,
+      });
     }
   }
 
-  return lines;
+  return tokens;
+}
+
+/**
+ * Layout text box with automatic height calculation based on wrapped lines
+ */
+export function computeTextBoxLayout(
+  ctx: CanvasRenderingContext2D | undefined | null,
+  box: TextBoxTemplate,
+  page: DesignPage,
+  targetW: number,
+  targetH: number
+): ComputedLayoutResult {
+  const scale = targetW / 1000;
+  const boxX = (box.x / 100) * targetW;
+  const boxY = (box.y / 100) * targetH;
+  const boxW = (box.width / 100) * targetW;
+  const scaledPadding = (box.padding || 0) * scale;
+  const innerW = Math.max(10, boxW - scaledPadding * 2);
+
+  // Determine runs: check richValues first, else values, else fieldLabel
+  let runs: TextRun[] = [];
+  if (page?.richValues && page.richValues[box.fieldLabel] && page.richValues[box.fieldLabel].length > 0) {
+    runs = page.richValues[box.fieldLabel];
+  } else {
+    const rawContent = page?.values ? page.values[box.fieldLabel] : undefined;
+    const text = rawContent !== undefined ? rawContent : box.fieldLabel;
+    runs = [{ text }];
+  }
+
+  const tokens = tokenizeRuns(runs, box, scale, ctx);
+
+  // Pack tokens into lines
+  const lines: LayoutLine[] = [];
+  let currentTokens: LayoutToken[] = [];
+  let currentLineWidth = 0;
+  let currentMaxFontSize = Math.max(6, Math.round(box.fontSize * scale));
+
+  const finishLine = () => {
+    // Trim trailing whitespace tokens from line width calculation
+    let trimmedWidth = currentLineWidth;
+    let endIdx = currentTokens.length - 1;
+    while (endIdx >= 0 && currentTokens[endIdx].isWhitespace) {
+      trimmedWidth -= currentTokens[endIdx].width;
+      endIdx--;
+    }
+
+    const lineHeightPx = currentMaxFontSize * (box.lineHeight || 1.3);
+    lines.push({
+      tokens: [...currentTokens],
+      width: Math.max(0, trimmedWidth),
+      height: lineHeightPx,
+      maxFontSize: currentMaxFontSize,
+    });
+
+    currentTokens = [];
+    currentLineWidth = 0;
+    currentMaxFontSize = Math.max(6, Math.round(box.fontSize * scale));
+  };
+
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+
+    if (t.isNewline) {
+      finishLine();
+      continue;
+    }
+
+    if (t.fontSize > currentMaxFontSize) {
+      currentMaxFontSize = t.fontSize;
+    }
+
+    // Check line wrapping
+    if (currentTokens.length > 0 && currentLineWidth + t.width > innerW) {
+      if (t.isWhitespace) {
+        // Drop leading space on wrap
+        continue;
+      }
+      finishLine();
+    }
+
+    // Don't add leading whitespace on a new line
+    if (currentTokens.length === 0 && t.isWhitespace) {
+      continue;
+    }
+
+    currentTokens.push(t);
+    currentLineWidth += t.width;
+  }
+
+  if (currentTokens.length > 0 || lines.length === 0) {
+    finishLine();
+  }
+
+  // Calculate total height automatically from all lines + padding
+  let totalLinesHeight = 0;
+  for (const line of lines) {
+    totalLinesHeight += line.height;
+  }
+
+  const computedHeightPx = Math.max(16 * scale, totalLinesHeight + scaledPadding * 2);
+  const computedHeightPercent = (computedHeightPx / targetH) * 100;
+
+  return {
+    lines,
+    computedHeightPx,
+    computedHeightPercent,
+    boxX,
+    boxY,
+    boxW,
+    scaledPadding,
+  };
 }
 
 export interface RenderCanvasOptions {
@@ -138,6 +377,7 @@ export interface RenderCanvasOptions {
 
 /**
  * Shared Canvas Renderer: renders design to an HTMLCanvasElement
+ * Automatically computes height to fit text, and renders mixed runs with effects.
  */
 export async function renderDesignToCanvas(
   canvas: HTMLCanvasElement,
@@ -146,12 +386,11 @@ export async function renderDesignToCanvas(
   imageSrcOrBlob: string | Blob,
   options: RenderCanvasOptions = {}
 ): Promise<void> {
-  // Use per-design text boxes if available, otherwise fallback to template
   const boxesToRender =
     page.textBoxes && page.textBoxes.length > 0 ? page.textBoxes : template;
 
   // Ensure fonts are explicitly loaded
-  await preloadTemplateFonts(boxesToRender);
+  await preloadTemplateFonts(boxesToRender, page.richValues);
 
   // Load decoded background image strictly under page.imageId
   const img = await getOrLoadDecodedImage(page.imageId, imageSrcOrBlob);
@@ -159,7 +398,6 @@ export async function renderDesignToCanvas(
   const nativeW = page.width || img.naturalWidth || 1000;
   const nativeH = page.height || img.naturalHeight || 1000;
 
-  // Determine target canvas dimensions
   const targetW = options.targetWidth || nativeW;
   const targetH = options.targetHeight || Math.round(targetW * (nativeH / nativeW));
 
@@ -176,23 +414,12 @@ export async function renderDesignToCanvas(
   // 1. Draw Background Image
   ctx.drawImage(img, 0, 0, targetW, targetH);
 
-  // 2. Proportional Scaling Baseline: fonts authored for 1000px wide
   const scale = targetW / 1000;
 
-  // 3. Render Text Boxes
+  // 2. Render Text Boxes with Automatic Height Fitting
   for (const box of boxesToRender) {
-    const rawContent = page.values[box.fieldLabel];
-    // If undefined, default to fieldLabel or placeholder; if empty string, render nothing
-    const content = rawContent !== undefined ? rawContent : box.fieldLabel;
-
-    const boxX = (box.x / 100) * targetW;
-    const boxY = (box.y / 100) * targetH;
-    const boxW = (box.width / 100) * targetW;
-    const boxH = (box.height / 100) * targetH;
-
-    const scaledFontSize = Math.max(6, Math.round(box.fontSize * scale));
-    const scaledPadding = (box.padding || 0) * scale;
-    const innerW = Math.max(10, boxW - scaledPadding * 2);
+    const layout = computeTextBoxLayout(ctx, box, page, targetW, targetH);
+    const { lines, boxX, boxY, boxW, computedHeightPx, scaledPadding } = layout;
 
     ctx.save();
 
@@ -200,62 +427,111 @@ export async function renderDesignToCanvas(
     if (box.fill && box.fill.opacity > 0) {
       ctx.fillStyle = box.fill.color;
       ctx.globalAlpha = box.fill.opacity;
-      ctx.fillRect(boxX, boxY, boxW, boxH);
+      ctx.fillRect(boxX, boxY, boxW, computedHeightPx);
       ctx.globalAlpha = 1.0;
     }
 
-    // Set font typography
-    const fontStyle = box.fontStyle === 'italic' ? 'italic' : 'normal';
-    const fontWeight = box.fontWeight || '400';
-    ctx.font = `${fontStyle} ${fontWeight} ${scaledFontSize}px "${box.fontFamily}", sans-serif`;
+    // Render each line and its mixed tokens
+    let currentY = boxY + scaledPadding;
 
-    // Apply Letter Spacing
-    if (box.letterSpacing && typeof (ctx as any).letterSpacing !== 'undefined') {
-      (ctx as any).letterSpacing = `${box.letterSpacing * scale}px`;
-    }
-
-    // Optional Shadow
-    if (box.shadow) {
-      ctx.shadowColor = box.shadow.color;
-      ctx.shadowBlur = box.shadow.blur * scale;
-      ctx.shadowOffsetX = box.shadow.offsetX * scale;
-      ctx.shadowOffsetY = box.shadow.offsetY * scale;
-    }
-
-    // Wrap Text into lines
-    const lines = content ? wrapText(ctx, content, innerW) : [];
-    const lineHeightPx = scaledFontSize * (box.lineHeight || 1.3);
-
-    ctx.fillStyle = box.color || '#FFF8E7';
-
-    // Vertical Positioning
-    let startY = boxY + scaledPadding + scaledFontSize;
-
-    // Horizontal Alignment
     for (const line of lines) {
-      const lineMeasure = ctx.measureText(line).width;
-      let lineX = boxX + scaledPadding;
+      // Baseline calculation within the line height
+      const baselineY = currentY + line.maxFontSize;
 
+      // Horizontal Alignment
+      let lineStartX = boxX + scaledPadding;
       if (box.textAlign === 'center') {
-        lineX = boxX + (boxW - lineMeasure) / 2;
+        lineStartX = boxX + (boxW - line.width) / 2;
       } else if (box.textAlign === 'right') {
-        lineX = boxX + boxW - scaledPadding - lineMeasure;
+        lineStartX = boxX + boxW - scaledPadding - line.width;
       }
 
-      // Optional Text Stroke / Outline
-      if (box.stroke && box.stroke.width > 0) {
-        ctx.strokeStyle = box.stroke.color;
-        ctx.lineWidth = box.stroke.width * scale;
-        ctx.strokeText(line, lineX, startY);
+      let tokenX = lineStartX;
+
+      for (const token of line.tokens) {
+        if (token.isWhitespace && token.text.trim() === '') {
+          tokenX += token.width;
+          continue;
+        }
+
+        ctx.save();
+        ctx.font = `${token.fontStyle} ${token.fontWeight} ${token.fontSize}px "${token.fontFamily}", sans-serif`;
+
+        if (token.letterSpacing && typeof (ctx as any).letterSpacing !== 'undefined') {
+          (ctx as any).letterSpacing = `${token.letterSpacing}px`;
+        }
+
+        // Apply Glow or Shadow Effect
+        const effects = token.effects;
+        if (effects?.glow?.enabled && effects.glow.strength > 0) {
+          ctx.shadowColor = effects.glow.color;
+          ctx.shadowBlur = effects.glow.strength * scale;
+          ctx.shadowOffsetX = 0;
+          ctx.shadowOffsetY = 0;
+        } else if (effects?.shadow?.enabled && effects.shadow) {
+          ctx.shadowColor = effects.shadow.color;
+          ctx.shadowBlur = effects.shadow.blur * scale;
+          ctx.shadowOffsetX = effects.shadow.offsetX * scale;
+          ctx.shadowOffsetY = effects.shadow.offsetY * scale;
+        } else if (box.shadow) {
+          ctx.shadowColor = box.shadow.color;
+          ctx.shadowBlur = box.shadow.blur * scale;
+          ctx.shadowOffsetX = box.shadow.offsetX * scale;
+          ctx.shadowOffsetY = box.shadow.offsetY * scale;
+        }
+
+        // Optional Outline / Stroke
+        if (effects?.outline?.enabled && effects.outline.width > 0) {
+          ctx.strokeStyle = effects.outline.color;
+          ctx.lineWidth = effects.outline.width * scale;
+          ctx.strokeText(token.text, tokenX, baselineY);
+        } else if (box.stroke && box.stroke.width > 0) {
+          ctx.strokeStyle = box.stroke.color;
+          ctx.lineWidth = box.stroke.width * scale;
+          ctx.strokeText(token.text, tokenX, baselineY);
+        }
+
+        // Fill text
+        ctx.fillStyle = token.color || '#FFF8E7';
+        ctx.fillText(token.text, tokenX, baselineY);
+
+        // Underline
+        if (token.underline) {
+          ctx.save();
+          ctx.shadowColor = 'transparent';
+          ctx.strokeStyle = token.color;
+          ctx.lineWidth = Math.max(1, Math.round(1.5 * scale));
+          ctx.beginPath();
+          ctx.moveTo(tokenX, baselineY + 3 * scale);
+          ctx.lineTo(tokenX + token.width, baselineY + 3 * scale);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        // Strikethrough
+        if (token.strike) {
+          ctx.save();
+          ctx.shadowColor = 'transparent';
+          ctx.strokeStyle = token.color;
+          ctx.lineWidth = Math.max(1, Math.round(1.5 * scale));
+          const strikeY = baselineY - token.fontSize * 0.32;
+          ctx.beginPath();
+          ctx.moveTo(tokenX, strikeY);
+          ctx.lineTo(tokenX + token.width, strikeY);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        ctx.restore();
+        tokenX += token.width;
       }
 
-      ctx.fillText(line, lineX, startY);
-      startY += lineHeightPx;
+      currentY += line.height;
     }
 
     ctx.restore();
 
-    // Optional Interactive Bounding Box for Workspace
+    // 3. Optional Selection Outline: Strictly fits computed text size
     if (options.showBoundingBoxes) {
       const isSelected = options.selectedBoxId === box.id;
       ctx.save();
@@ -264,49 +540,39 @@ export async function renderDesignToCanvas(
       if (!isSelected) {
         ctx.setLineDash([4, 4]);
       }
-      ctx.strokeRect(boxX, boxY, boxW, boxH);
+
+      // Draw bounding box matching real computed height
+      ctx.strokeRect(boxX, boxY, boxW, computedHeightPx);
 
       if (isSelected) {
-        // Draw 4 Corner Handles with drop-shadow and white-gold contrast
-        const cornerSize = Math.max(10, Math.min(16, Math.round(12 * scale)));
-        const edgeSize = Math.max(8, Math.min(14, Math.round(10 * scale)));
+        const handleRadius = Math.max(6, Math.min(10, Math.round(8 * scale)));
 
-        const drawHandle = (hx: number, hy: number, isCorner: boolean) => {
+        const drawHandle = (hx: number, hy: number) => {
           ctx.save();
           ctx.shadowColor = 'rgba(0,0,0,0.6)';
           ctx.shadowBlur = 4;
           ctx.fillStyle = '#FFFFFF';
           ctx.strokeStyle = '#D4AF37';
           ctx.lineWidth = 2.5;
-
-          const size = isCorner ? cornerSize : edgeSize;
           ctx.beginPath();
-          if (isCorner) {
-            // Circle handle for corners
-            ctx.arc(hx, hy, size / 2, 0, Math.PI * 2);
-          } else {
-            // Rounded rect/pill for edges
-            ctx.arc(hx, hy, size / 2.5, 0, Math.PI * 2);
-          }
+          ctx.arc(hx, hy, handleRadius, 0, Math.PI * 2);
           ctx.fill();
           ctx.stroke();
           ctx.restore();
         };
 
-        // 4 Corners (NW, NE, SE, SW)
-        drawHandle(boxX, boxY, true); // NW
-        drawHandle(boxX + boxW, boxY, true); // NE
-        drawHandle(boxX + boxW, boxY + boxH, true); // SE
-        drawHandle(boxX, boxY + boxH, true); // SW
+        // Left and Right width handles (automatic height: top/bottom handles removed!)
+        drawHandle(boxX, boxY + computedHeightPx / 2); // W
+        drawHandle(boxX + boxW, boxY + computedHeightPx / 2); // E
 
-        // 4 Edge Midpoints (N, E, S, W)
-        drawHandle(boxX + boxW / 2, boxY, false); // N
-        drawHandle(boxX + boxW, boxY + boxH / 2, false); // E
-        drawHandle(boxX + boxW / 2, boxY + boxH, false); // S
-        drawHandle(boxX, boxY + boxH / 2, false); // W
+        // 4 Corner handles for width & position adjustment
+        drawHandle(boxX, boxY); // NW
+        drawHandle(boxX + boxW, boxY); // NE
+        drawHandle(boxX + boxW, boxY + computedHeightPx); // SE
+        drawHandle(boxX, boxY + computedHeightPx); // SW
 
-        // Small top badge with field label and dimensions
-        const badgeText = `${box.fieldLabel} (${box.width}% × ${box.height}%)`;
+        // Floating field badge
+        const badgeText = `${box.fieldLabel} (${box.width}%)`;
         ctx.font = `600 ${Math.max(10, Math.round(11 * scale))}px "Plus Jakarta Sans", sans-serif`;
         const badgeW = ctx.measureText(badgeText).width + 12;
         const badgeH = Math.max(16, Math.round(18 * scale));
@@ -329,4 +595,3 @@ export async function renderDesignToCanvas(
     }
   }
 }
-

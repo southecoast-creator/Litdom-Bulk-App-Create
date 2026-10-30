@@ -6,7 +6,7 @@
  */
 
 import * as XLSX from 'xlsx';
-import { TextBoxTemplate, DesignPage } from '../types';
+import { TextBoxTemplate, DesignPage, TextRun } from '../types';
 
 export interface ParsedSpreadsheet {
   filename: string;
@@ -245,8 +245,61 @@ export function calculateAutoMappings(
 }
 
 /**
+ * Parse markdown cell markers into plain text and TextRun array:
+ * **bold**, *italic*, __underline__, ~~strike~~
+ */
+export function parseMarkdownRuns(cellText: string): { plainText: string; runs: TextRun[] } {
+  if (!cellText) {
+    return { plainText: '', runs: [] };
+  }
+
+  // Regex for **bold**, *italic*, __underline__, ~~strike~~
+  const regex = /(\*\*([^*]+?)\*\*|\*([^*]+?)\*|__([^_]+?)__|~~([^~]+?)~~)/g;
+  const runs: TextRun[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(cellText)) !== null) {
+    const matchIndex = match.index;
+    if (matchIndex > lastIndex) {
+      const textBefore = cellText.slice(lastIndex, matchIndex);
+      if (textBefore) runs.push({ text: textBefore });
+    }
+
+    if (match[2] !== undefined) {
+      // **bold**
+      runs.push({ text: match[2], bold: true });
+    } else if (match[3] !== undefined) {
+      // *italic*
+      runs.push({ text: match[3], italic: true });
+    } else if (match[4] !== undefined) {
+      // __underline__
+      runs.push({ text: match[4], underline: true });
+    } else if (match[5] !== undefined) {
+      // ~~strike~~
+      runs.push({ text: match[5], strike: true });
+    }
+
+    lastIndex = matchIndex + match[0].length;
+  }
+
+  if (lastIndex < cellText.length) {
+    const remaining = cellText.slice(lastIndex);
+    if (remaining) runs.push({ text: remaining });
+  }
+
+  if (runs.length === 0) {
+    runs.push({ text: cellText });
+  }
+
+  const plainText = runs.map((r) => r.text).join('');
+  return { plainText, runs };
+}
+
+/**
  * Apply mapped spreadsheet rows immediately to design pages:
  * Row 1 -> Design 1, Row 2 -> Design 2, etc.
+ * Converts markdown markers (**bold**, *italic*, __underline__, ~~strike~~) into rich text runs.
  * Empty cells remain empty strings; text styles and background images are 100% preserved.
  */
 export function populateDesignsFromSpreadsheet(
@@ -274,17 +327,21 @@ export function populateDesignsFromSpreadsheet(
     if (idx < totalRows) {
       const row = rows[idx];
       const updatedValues = { ...page.values };
+      const updatedRichValues = { ...(page.richValues || {}) };
 
       for (const [fieldLabel, colName] of Object.entries(mappings)) {
         if (colName && row[colName] !== undefined) {
-          // Replace with row value, or empty string if cell is empty
-          updatedValues[fieldLabel] = row[colName];
+          const rawCell = row[colName];
+          const { plainText, runs } = parseMarkdownRuns(rawCell);
+          updatedValues[fieldLabel] = plainText;
+          updatedRichValues[fieldLabel] = runs;
         }
       }
 
       return {
         ...page,
         values: updatedValues,
+        richValues: updatedRichValues,
       };
     }
 

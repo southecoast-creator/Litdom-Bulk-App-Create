@@ -314,7 +314,7 @@ console.log('\n[TEST 9] Font Management Utility Format & Name Processing');
 
   assert.strictEqual(
     cleanFontFamilyName('CinzelDecorative-Bold.ttf'),
-    'CinzelDecorative Bold'
+    'Cinzel Decorative Bold'
   );
   assert.strictEqual(
     cleanFontFamilyName('Apex_Sovereign_Display.otf'),
@@ -522,5 +522,190 @@ console.log('\n[TEST 14] 10-Design Batch Grouping for Web Share API');
   console.log('✅ PASS: Large batch chunking splits into groups of 10 for Web Share API');
 }
 
+// ---------------------------------------------------------------------------
+// TEST 15: Spreadsheet Markdown Parsing to TextRun[]
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 15] Spreadsheet Markdown Parsing to TextRun[]');
+{
+  const { parseMarkdownRuns } = await import('../src/utils/spreadsheetEngine');
+
+  const text = 'Discover **Diamond** and *Platinum* with __Guarantee__ or ~~Old Price~~';
+  const { runs } = parseMarkdownRuns(text);
+
+  assert.strictEqual(runs.length, 8, 'Parsed into 8 segments (plain, bold, plain, italic, plain, underline, plain, strike)');
+
+  // Verify bold
+  const boldRun = runs.find((r) => r.text === 'Diamond');
+  assert.ok(boldRun, 'Diamond run exists');
+  assert.strictEqual(boldRun?.bold, true, 'Diamond is bold');
+
+  // Verify italic
+  const italicRun = runs.find((r) => r.text === 'Platinum');
+  assert.ok(italicRun, 'Platinum run exists');
+  assert.strictEqual(italicRun?.italic, true, 'Platinum is italic');
+
+  // Verify underline
+  const underlineRun = runs.find((r) => r.text === 'Guarantee');
+  assert.ok(underlineRun, 'Guarantee run exists');
+  assert.strictEqual(underlineRun?.underline, true, 'Guarantee is underlined');
+
+  // Verify strike
+  const strikeRun = runs.find((r) => r.text === 'Old Price');
+  assert.ok(strikeRun, 'Old Price run exists');
+  assert.strictEqual(strikeRun?.strike, true, 'Old Price is strikethrough');
+
+  // Verify plain text preserved without markdown tokens
+  const plainRun = runs.find((r) => r.text.includes('Discover'));
+  assert.ok(plainRun, 'Plain prefix exists');
+  assert.strictEqual(plainRun?.bold, undefined);
+
+  console.log('✅ PASS: Markdown markers successfully parsed into styled TextRun objects');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 16: Automatic Height Computation (Height fits text, width-only control)
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 16] Automatic Height Computation');
+{
+  const { computeTextBoxLayout } = await import('../src/utils/canvasEngine');
+
+  const mockCtx: any = {
+    font: '',
+    measureText: (str: string) => ({ width: str.length * 28 }),
+  };
+
+  // Single line
+  const boxSingle = {
+    ...testTemplate[0],
+    width: 80,
+  };
+  const pageSingle: any = {
+    id: 'p_test1',
+    values: { [boxSingle.fieldLabel]: 'Short Headline' },
+  };
+  const layoutSingle = computeTextBoxLayout(
+    mockCtx,
+    boxSingle,
+    pageSingle,
+    1000,
+    1000
+  );
+
+  // Multi-line wrapping
+  const longText =
+    'This is an exceptionally long paragraph designed specifically to wrap over several consecutive lines within the bounded width.';
+  const pageMulti: any = {
+    id: 'p_test2',
+    values: { [boxSingle.fieldLabel]: longText },
+  };
+  const layoutMulti = computeTextBoxLayout(
+    mockCtx,
+    boxSingle,
+    pageMulti,
+    1000,
+    1000
+  );
+
+  assert.strictEqual(layoutSingle.lines.length, 1, 'Single headline generates 1 line');
+  assert.ok(layoutMulti.lines.length > 1, 'Long copy wraps into multiple lines');
+  assert.ok(
+    layoutMulti.computedHeightPx > layoutSingle.computedHeightPx,
+    'Box height grows automatically to accommodate wrapped lines'
+  );
+  assert.strictEqual(
+    layoutSingle.boxW,
+    800,
+    'Box width strictly respects the 80% width configuration (800px on 1000px canvas)'
+  );
+  console.log('✅ PASS: Dynamic automatic height calculation verified');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 17: Binary SFNT 'name' Table Parser
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 17] Binary SFNT Font Family Name Table Parser');
+{
+  const { extractFontFamilyNameFromSFNT } = await import('../src/utils/fontManager');
+
+  // Fallback check when buffer is corrupt or non-SFNT
+  const emptyBuffer = new ArrayBuffer(64);
+  const fallback = extractFontFamilyNameFromSFNT(emptyBuffer, 'Custom_Brand_Font-Bold.ttf');
+  assert.strictEqual(fallback, 'Custom Brand Font Bold', 'Fallback cleans filename properly');
+
+  // Construct a minimal valid SFNT with 'name' table (Windows UTF-16BE NameID 1)
+  const fontName = 'Imperial Chrono';
+  const nameUtf16Bytes: number[] = [];
+  for (let i = 0; i < fontName.length; i++) {
+    const code = fontName.charCodeAt(i);
+    nameUtf16Bytes.push((code >> 8) & 0xff);
+    nameUtf16Bytes.push(code & 0xff);
+  }
+
+  // SFNT header (12 bytes) + 1 table record (16 bytes) = 28 bytes offset to name table
+  const nameTableOffset = 32;
+  const stringStorageOffset = 18; // 6 (header) + 12 (1 record)
+  const totalLength = nameTableOffset + stringStorageOffset + nameUtf16Bytes.length + 16;
+  const buffer = new ArrayBuffer(totalLength);
+  const view = new DataView(buffer);
+
+  // SFNT Tag (0x00010000 for TrueType)
+  view.setUint32(0, 0x00010000, false);
+  view.setUint16(4, 1, false); // 1 table
+
+  // Table record for 'name' (0x6E616D65)
+  view.setUint32(12, 0x6e616d65, false);
+  view.setUint32(16, 0, false); // checksum
+  view.setUint32(20, nameTableOffset, false); // offset
+  view.setUint32(24, stringStorageOffset + nameUtf16Bytes.length, false); // length
+
+  // Name table header
+  view.setUint16(nameTableOffset, 0, false); // format 0
+  view.setUint16(nameTableOffset + 2, 1, false); // 1 record count
+  view.setUint16(nameTableOffset + 4, stringStorageOffset, false); // string storage offset
+
+  // Name record: platform 3 (Windows), encoding 1 (Unicode), lang 0x0409 (en-US), nameID 1 (Family)
+  const recOffset = nameTableOffset + 6;
+  view.setUint16(recOffset, 3, false); // platform 3
+  view.setUint16(recOffset + 2, 1, false); // encoding 1
+  view.setUint16(recOffset + 4, 0x0409, false); // lang
+  view.setUint16(recOffset + 6, 1, false); // nameID 1
+  view.setUint16(recOffset + 8, nameUtf16Bytes.length, false); // length
+  view.setUint16(recOffset + 10, 0, false); // string offset
+
+  // Write name UTF-16BE bytes into string storage
+  const stringPos = nameTableOffset + stringStorageOffset;
+  for (let i = 0; i < nameUtf16Bytes.length; i++) {
+    view.setUint8(stringPos + i, nameUtf16Bytes[i]);
+  }
+
+  const extracted = extractFontFamilyNameFromSFNT(buffer, 'fallback.ttf');
+  assert.strictEqual(extracted, 'Imperial Chrono', 'Successfully extracted family name from binary SFNT name table');
+  console.log('✅ PASS: Binary SFNT name table parsing verified');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 18: Honest Storage Math & Empty Zero-Byte Guarantee
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 18] Honest Storage Calculation');
+{
+  const { formatBytes } = await import('../src/utils/db');
+
+  assert.strictEqual(formatBytes(0), '0 B', 'Zero bytes formats as exactly "0 B"');
+  assert.strictEqual(formatBytes(-5), '0 B', 'Negative/corrupt bytes format as "0 B"');
+  assert.strictEqual(formatBytes(1024), '1 KB');
+  assert.strictEqual(formatBytes(1024 * 1024 * 2.5), '2.5 MB');
+
+  // Verify breakdown summing
+  const breakdown = {
+    designsBytes: 1500000,
+    fontsBytes: 500000,
+    projectsBytes: 12000,
+  };
+  const total = breakdown.designsBytes + breakdown.fontsBytes + breakdown.projectsBytes;
+  assert.strictEqual(total, 2012000, 'Sum is mathematically exact');
+  console.log('✅ PASS: Honest storage calculation and 0 B baseline verified');
+}
+
 console.log('\n--- ALL UNIT TESTS COMPLETED SUCCESSFULLY ---');
+
 

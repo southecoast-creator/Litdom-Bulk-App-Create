@@ -38,6 +38,7 @@ export const SpreadsheetSheet: React.FC<SpreadsheetSheetProps> = ({
 }) => {
   const [isParsing, setIsParsing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   if (!isOpen) return null;
@@ -47,12 +48,10 @@ export const SpreadsheetSheet: React.FC<SpreadsheetSheetProps> = ({
   const headers = currentSheet?.headers || [];
   const rows = currentSheet?.rows || [];
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
+  const processFile = async (file: File) => {
     setIsParsing(true);
     setErrorMessage(null);
+    setPendingFile(null);
 
     try {
       const parsed: ParsedSpreadsheet = await parseSpreadsheetFile(file);
@@ -86,6 +85,23 @@ export const SpreadsheetSheet: React.FC<SpreadsheetSheetProps> = ({
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Check if re-importing over existing populated designs
+    const hasExistingData =
+      !!currentSheet ||
+      project.pages.some((p) => Object.keys(p.values || {}).length > 0);
+
+    if (hasExistingData) {
+      setPendingFile(file);
+    } else {
+      processFile(file);
+    }
+  };
+
 
   const handleMappingChange = (fieldLabel: string, colName: string) => {
     if (!currentSheet) return;
@@ -387,6 +403,41 @@ export const SpreadsheetSheet: React.FC<SpreadsheetSheetProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Confirmation Modal when re-importing spreadsheet */}
+      {pendingFile && (
+        <div className="fixed inset-0 z-60 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#17171C] border border-amber-500/40 rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
+            <div className="flex items-center gap-3 text-amber-400">
+              <AlertTriangle className="w-6 h-6 shrink-0" />
+              <h4 className="font-bold text-base text-[#FFF8E7]">Re-import Spreadsheet?</h4>
+            </div>
+            <p className="text-xs text-[#FFF8E7]/80 leading-relaxed">
+              Importing <span className="text-[#D4AF37] font-semibold">"{pendingFile.name}"</span> will replace the text and word-level formatting in mapped fields across all {project.pages.length} design pages.
+            </p>
+            <p className="text-xs text-[#FFF8E7]/60">
+              Do you want to continue and populate your designs with this new spreadsheet?
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                onClick={() => {
+                  setPendingFile(null);
+                  if (fileInputRef.current) fileInputRef.current.value = '';
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-[#FFF8E7]/70 hover:bg-[#212128] transition-colors min-h-[40px]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => processFile(pendingFile)}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-[#D4AF37] hover:bg-[#F4D58D] text-[#0B0B0F] shadow-lg shadow-[#D4AF37]/20 transition-all min-h-[40px]"
+              >
+                Yes, Replace & Populate
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

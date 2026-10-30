@@ -1,13 +1,22 @@
 /**
  * Litdom Batch Studio - IndexedDB Storage Engine
- * High-reliability database storing lightweight projects in "projects" store
- * and binary Blobs in "images" store (with ~220px thumbnails).
- * Reuses a single connection, handles automatic reconnects, and migrates legacy formats.
+ * High-reliability database storing lightweight projects in "projects" store,
+ * binary Blobs (original + ~1200px preview + ~240px thumbnail) in "images" store,
+ * and custom font Blobs in "fonts" store.
+ * Supports honest exact byte accounting, atomic single/batch deletion, and complete wipe.
  */
 
-import { Project, TextBoxTemplate, DesignPage, StoredImageRecord, StoredFontRecord } from '../types';
+import {
+  Project,
+  TextBoxTemplate,
+  DesignPage,
+  StoredImageRecord,
+  StoredFontRecord,
+  StorageBreakdown,
+} from '../types';
 
 const DB_NAME = 'litdom_batch_studio_v2';
+const OLD_DB_NAME = 'litdom_batch_studio_db';
 const DB_VERSION = 2;
 const STORE_PROJECTS = 'projects';
 const STORE_IMAGES = 'images';
@@ -27,7 +36,11 @@ export function createManagedObjectUrl(blob: Blob): string {
 
 export function revokeManagedObjectUrl(url: string): void {
   if (url && activeObjectUrls.has(url)) {
-    URL.revokeObjectURL(url);
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      // safe fallback
+    }
     activeObjectUrls.delete(url);
   }
 }
@@ -119,7 +132,6 @@ export function createDefaultTemplate(): TextBoxTemplate[] {
       x: 10,
       y: 20,
       width: 80,
-      height: 12,
       fontFamily: 'Cinzel',
       fontSize: 48,
       fontWeight: '700',
@@ -135,7 +147,6 @@ export function createDefaultTemplate(): TextBoxTemplate[] {
       x: 15,
       y: 36,
       width: 70,
-      height: 8,
       fontFamily: 'Plus Jakarta Sans',
       fontSize: 24,
       fontWeight: '500',
@@ -151,7 +162,6 @@ export function createDefaultTemplate(): TextBoxTemplate[] {
       x: 15,
       y: 48,
       width: 70,
-      height: 16,
       fontFamily: 'Plus Jakarta Sans',
       fontSize: 20,
       fontWeight: '400',
@@ -167,7 +177,6 @@ export function createDefaultTemplate(): TextBoxTemplate[] {
       x: 25,
       y: 72,
       width: 50,
-      height: 8,
       fontFamily: 'Montserrat',
       fontSize: 18,
       fontWeight: '700',
@@ -181,22 +190,21 @@ export function createDefaultTemplate(): TextBoxTemplate[] {
 }
 
 /**
- * Generate a ~220px JPEG thumbnail Blob from an Image/Blob
+ * Generate a resized JPEG Blob from an Image/Blob
  */
-export async function createThumbnailBlob(
+export async function createResizedImageBlob(
   source: Blob | HTMLImageElement,
-  maxDimension = 240
+  maxDimension: number,
+  quality = 0.85
 ): Promise<Blob> {
   let img: HTMLImageElement;
-  let shouldRevoke = false;
 
   if (source instanceof Blob) {
     img = new Image();
     const url = URL.createObjectURL(source);
-    shouldRevoke = true;
     await new Promise<void>((resolve, reject) => {
       img.onload = () => resolve();
-      img.onerror = () => reject(new Error('Failed to load image for thumbnail'));
+      img.onerror = () => reject(new Error('Failed to load image for resizing'));
       img.src = url;
     });
     URL.revokeObjectURL(url);
@@ -204,42 +212,52 @@ export async function createThumbnailBlob(
     img = source;
   }
 
-  const canvas = document.createElement('canvas');
   const srcW = img.naturalWidth || img.width || 1000;
   const srcH = img.naturalHeight || img.height || 1000;
 
-  const ratio = srcW / srcH;
-  let dstW = maxDimension;
-  let dstH = Math.round(maxDimension / ratio);
+  let dstW = srcW;
+  let dstH = srcH;
 
-  if (srcH > srcW) {
-    dstH = maxDimension;
-    dstW = Math.round(maxDimension * ratio);
+  if (srcW > maxDimension || srcH > maxDimension) {
+    const ratio = srcW / srcH;
+    if (srcW > srcH) {
+      dstW = maxDimension;
+      dstH = Math.round(maxDimension / ratio);
+    } else {
+      dstH = maxDimension;
+      dstW = Math.round(maxDimension * ratio);
+    }
   }
 
+  const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, dstW);
   canvas.height = Math.max(1, dstH);
   const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Cannot get canvas 2d context for thumbnail');
+  if (!ctx) throw new Error('Cannot get canvas 2d context');
 
   ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'medium';
+  ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
   return new Promise<Blob>((resolve, reject) => {
     canvas.toBlob(
       (b) => {
+        canvas.width = 1;
+        canvas.height = 1;
         if (b) resolve(b);
-        else reject(new Error('Thumbnail generation failed'));
+        else reject(new Error('Resizing image failed'));
       },
       'image/jpeg',
-      0.82
+      quality
     );
   });
 }
 
 /**
- * Save an uploaded design image into the "images" store as Blobs (original + ~220px thumbnail)
+ * Save an uploaded design image into the "images" store as Blobs:
+ * - originalBlob: full resolution
+ * - previewBlob: ~1200px wide for high-speed buttery editing
+ * - thumbnailBlob: ~240px for thumbnail carousel
  */
 export async function storeImageFile(
   fileOrBlob: File | Blob
@@ -259,11 +277,19 @@ export async function storeImageFile(
 
   const width = img.naturalWidth || 1000;
   const height = img.naturalHeight || 1000;
-  const thumbnailBlob = await createThumbnailBlob(img, 240);
+
+  // Generate downscaled preview (~1200px) and thumbnail (~240px)
+  const [previewBlob, thumbnailBlob] = await Promise.all([
+    width > 1200 || height > 1200
+      ? createResizedImageBlob(img, 1200, 0.88)
+      : fileOrBlob,
+    createResizedImageBlob(img, 240, 0.82),
+  ]);
 
   const record: StoredImageRecord = {
     id: imageId,
     originalBlob: fileOrBlob,
+    previewBlob,
     thumbnailBlob,
     mimeType: fileOrBlob.type || 'image/png',
     width,
@@ -303,6 +329,15 @@ export async function getOriginalImageBlob(imageId: string): Promise<Blob | null
   return record ? record.originalBlob : null;
 }
 
+/**
+ * Get downscaled preview Blob (~1200px) for smooth 60fps editing on screen
+ */
+export async function getPreviewImageBlob(imageId: string): Promise<Blob | null> {
+  const record = await getImageRecord(imageId);
+  if (!record) return null;
+  return record.previewBlob || record.originalBlob;
+}
+
 export async function deleteImages(imageIds: string[]): Promise<void> {
   if (!imageIds.length) return;
   const db = await getDB();
@@ -318,7 +353,7 @@ export async function deleteImages(imageIds: string[]): Promise<void> {
 }
 
 /**
- * Migration helper: converts base64 data URLs to Blobs and saves to "images" store
+ * Convert base64 data URLs to Blobs (migration helper)
  */
 async function base64ToBlob(base64DataUrl: string): Promise<Blob> {
   const res = await fetch(base64DataUrl);
@@ -326,16 +361,16 @@ async function base64ToBlob(base64DataUrl: string): Promise<Blob> {
 }
 
 /**
- * Migrate legacy projects into the new shared-template format
+ * Migrate legacy projects into modern format with per-design text boxes
  */
 export async function migrateLegacyProject(rawProject: any): Promise<Project> {
-  let template: TextBoxTemplate[] = Array.isArray(rawProject.template) && rawProject.template.length > 0
-    ? rawProject.template
-    : [];
+  let template: TextBoxTemplate[] =
+    Array.isArray(rawProject.template) && rawProject.template.length > 0
+      ? rawProject.template
+      : [];
 
   const legacyPages: any[] = rawProject.pages || [];
 
-  // Extract shared template from the first page that has textBoxes if template was empty
   if (template.length === 0) {
     for (const page of legacyPages) {
       if (page.textBoxes && Array.isArray(page.textBoxes) && page.textBoxes.length > 0) {
@@ -349,7 +384,6 @@ export async function migrateLegacyProject(rawProject: any): Promise<Project> {
             x: typeof b.x === 'number' ? b.x : 10,
             y: typeof b.y === 'number' ? b.y : 10 + idx * 15,
             width: typeof b.width === 'number' ? b.width : 80,
-            height: typeof b.height === 'number' ? b.height : 12,
             fontFamily: b.fontFamily || 'Plus Jakarta Sans',
             fontSize: baselineFontSize,
             fontWeight: b.fontWeight || '600',
@@ -372,7 +406,6 @@ export async function migrateLegacyProject(rawProject: any): Promise<Project> {
     template = createDefaultTemplate();
   }
 
-  // Check if project is already completely modern and clean
   const isAlreadyModern =
     Array.isArray(rawProject.template) &&
     rawProject.template.length > 0 &&
@@ -390,7 +423,6 @@ export async function migrateLegacyProject(rawProject: any): Promise<Project> {
     return rawProject as Project;
   }
 
-  // Migrate pages and extract images into Blobs, ensuring each page has its own textBoxes
   const newPages: DesignPage[] = [];
 
   for (let i = 0; i < legacyPages.length; i++) {
@@ -412,7 +444,6 @@ export async function migrateLegacyProject(rawProject: any): Promise<Project> {
       }
     }
 
-    // Populate values from legacy textBoxes
     const values: Record<string, string> = { ...(lp.values || {}) };
     if (lp.textBoxes && Array.isArray(lp.textBoxes)) {
       for (const box of lp.textBoxes) {
@@ -422,7 +453,6 @@ export async function migrateLegacyProject(rawProject: any): Promise<Project> {
       }
     }
 
-    // Per-design text boxes: clone from page if present, otherwise deep clone project template
     let pageBoxes: TextBoxTemplate[];
     if (Array.isArray(lp.textBoxes) && lp.textBoxes.length > 0 && lp.textBoxes[0].fieldLabel) {
       const pageW = lp.originalWidth || lp.width || 1000;
@@ -432,7 +462,6 @@ export async function migrateLegacyProject(rawProject: any): Promise<Project> {
         x: typeof b.x === 'number' ? b.x : 10,
         y: typeof b.y === 'number' ? b.y : 10 + idx * 15,
         width: typeof b.width === 'number' ? b.width : 80,
-        height: typeof b.height === 'number' ? b.height : 12,
         fontFamily: b.fontFamily || 'Plus Jakarta Sans',
         fontSize: b.fontSize ? (b.fontSize > 150 ? Math.round(b.fontSize * (1000 / pageW)) : b.fontSize) : 24,
         fontWeight: b.fontWeight || '600',
@@ -456,6 +485,7 @@ export async function migrateLegacyProject(rawProject: any): Promise<Project> {
       width: lp.originalWidth || lp.width || 1000,
       height: lp.originalHeight || lp.height || 1000,
       values,
+      richValues: lp.richValues || {},
       textBoxes: pageBoxes,
     });
   }
@@ -471,7 +501,6 @@ export async function migrateLegacyProject(rawProject: any): Promise<Project> {
     customFonts: rawProject.customFonts || [],
   };
 
-  // Re-save the migrated project to IndexedDB
   await saveProject(migrated);
   return migrated;
 }
@@ -548,33 +577,322 @@ export async function getAllProjects(): Promise<Project[]> {
 }
 
 /**
- * Delete a project and its associated image Blobs
+ * Atomic Project Deletion: deletes project and its unreferenced image records
+ * in a SINGLE IndexedDB transaction without running migration!
  */
 export async function deleteProject(id: string): Promise<void> {
-  const project = await getProject(id);
-  const imageIdsToDelete: string[] = [];
-  if (project?.pages) {
-    for (const p of project.pages) {
-      if (p.imageId) imageIdsToDelete.push(p.imageId);
-    }
+  const db = await getDB();
+
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction([STORE_PROJECTS, STORE_IMAGES], 'readwrite');
+    const projStore = tx.objectStore(STORE_PROJECTS);
+    const imgStore = tx.objectStore(STORE_IMAGES);
+
+    // 1. Get all projects to find orphaned images safely
+    const allProjReq = projStore.getAll();
+
+    allProjReq.onsuccess = () => {
+      const allProjects: Project[] = allProjReq.result || [];
+      const targetProject = allProjects.find((p) => p.id === id);
+
+      // Collect target project's images
+      const targetImages = new Set<string>();
+      if (targetProject?.pages) {
+        for (const p of targetProject.pages) {
+          if (p.imageId) targetImages.add(p.imageId);
+        }
+      }
+
+      // Check which images are still used by other projects
+      const otherReferencedImages = new Set<string>();
+      for (const p of allProjects) {
+        if (p.id !== id && p.pages) {
+          for (const page of p.pages) {
+            if (page.imageId) otherReferencedImages.add(page.imageId);
+          }
+        }
+      }
+
+      // Delete the project
+      projStore.delete(id);
+
+      // Delete images that are not used by any other project
+      for (const imgId of targetImages) {
+        if (!otherReferencedImages.has(imgId)) {
+          imgStore.delete(imgId);
+        }
+      }
+    };
+
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(new Error('Could not delete project and image assets.'));
+  });
+}
+
+/**
+ * Atomic Multi-Page Deletion from Project:
+ * Deletes specified pages from project and immediately deletes their image records
+ * if not used by any other design in any project.
+ */
+export async function deleteDesignsFromProjectAtomic(
+  projectId: string,
+  pageIdsToDelete: string[]
+): Promise<Project> {
+  const db = await getDB();
+  const pageIdSet = new Set(pageIdsToDelete);
+
+  return new Promise<Project>((resolve, reject) => {
+    const tx = db.transaction([STORE_PROJECTS, STORE_IMAGES], 'readwrite');
+    const projStore = tx.objectStore(STORE_PROJECTS);
+    const imgStore = tx.objectStore(STORE_IMAGES);
+
+    const allProjReq = projStore.getAll();
+
+    allProjReq.onsuccess = () => {
+      const allProjects: Project[] = allProjReq.result || [];
+      const targetProject = allProjects.find((p) => p.id === projectId);
+      if (!targetProject) {
+        reject(new Error('Project not found'));
+        return;
+      }
+
+      // Find deleted pages and their image IDs
+      const deletedImages = new Set<string>();
+      const retainedPages: DesignPage[] = [];
+
+      for (const p of targetProject.pages || []) {
+        if (pageIdSet.has(p.id)) {
+          if (p.imageId) deletedImages.add(p.imageId);
+        } else {
+          retainedPages.push(p);
+        }
+      }
+
+      const updatedProject: Project = {
+        ...targetProject,
+        pages: retainedPages,
+        updatedAt: Date.now(),
+      };
+
+      // Save updated project
+      projStore.put(updatedProject);
+
+      // Check if any deleted image is still used by retained pages or other projects
+      const stillUsedImages = new Set<string>();
+      for (const p of allProjects) {
+        const pages = p.id === projectId ? retainedPages : p.pages || [];
+        for (const page of pages) {
+          if (page.imageId) stillUsedImages.add(page.imageId);
+        }
+      }
+
+      for (const imgId of deletedImages) {
+        if (!stillUsedImages.has(imgId)) {
+          imgStore.delete(imgId);
+        }
+      }
+
+      tx.oncomplete = () => resolve(updatedProject);
+    };
+
+    tx.onerror = () => reject(new Error('Failed to delete selected design pages.'));
+  });
+}
+
+/**
+ * Exact Storage Calculation:
+ * Exact sum of the byte sizes of all stored image blobs (original + preview + thumbnail),
+ * font blobs, and project JSON strings. Reads 0 B when nothing is stored.
+ */
+export async function calculateExactStorageBreakdown(): Promise<StorageBreakdown> {
+  const db = await getDB();
+
+  return new Promise<StorageBreakdown>((resolve, reject) => {
+    const tx = db.transaction([STORE_PROJECTS, STORE_IMAGES, STORE_FONTS], 'readonly');
+    const projStore = tx.objectStore(STORE_PROJECTS);
+    const imgStore = tx.objectStore(STORE_IMAGES);
+    const fontStore = tx.objectStore(STORE_FONTS);
+
+    let projectsBytes = 0;
+    let designsBytes = 0;
+    let fontsBytes = 0;
+    const projectSizes: Record<string, number> = {};
+    const imageSizeMap: Record<string, number> = {};
+
+    const imgReq = imgStore.getAll();
+    const fontReq = fontStore.getAll();
+    const projReq = projStore.getAll();
+
+    tx.oncomplete = () => {
+      // 1. Calculate image sizes
+      const images: StoredImageRecord[] = imgReq.result || [];
+      for (const img of images) {
+        let size = 0;
+        if (img.originalBlob) size += img.originalBlob.size || 0;
+        if (img.previewBlob) size += img.previewBlob.size || 0;
+        if (img.thumbnailBlob) size += img.thumbnailBlob.size || 0;
+        designsBytes += size;
+        imageSizeMap[img.id] = size;
+      }
+
+      // 2. Calculate font sizes
+      const fonts: StoredFontRecord[] = fontReq.result || [];
+      for (const f of fonts) {
+        fontsBytes += f.blob ? f.blob.size || 0 : f.fileSize || 0;
+      }
+
+      // 3. Calculate project sizes
+      const projects: Project[] = projReq.result || [];
+      for (const p of projects) {
+        const jsonBytes = new Blob([JSON.stringify(p)]).size;
+        projectsBytes += jsonBytes;
+
+        let projImagesSize = 0;
+        if (p.pages) {
+          for (const page of p.pages) {
+            if (page.imageId && imageSizeMap[page.imageId]) {
+              projImagesSize += imageSizeMap[page.imageId];
+            }
+          }
+        }
+        projectSizes[p.id] = jsonBytes + projImagesSize;
+      }
+
+      const totalBytes = designsBytes + fontsBytes + projectsBytes;
+
+      resolve({
+        designsBytes,
+        fontsBytes,
+        projectsBytes,
+        totalBytes,
+        projectSizes,
+      });
+    };
+
+    tx.onerror = () => reject(new Error('Failed to compute storage breakdown.'));
+  });
+}
+
+/**
+ * Clean up orphaned images not referenced by any project,
+ * and delete old database 'litdom_batch_studio_db'.
+ */
+export async function cleanupOrphanedImages(): Promise<{ freedBytes: number; deletedCount: number }> {
+  const db = await getDB();
+
+  // Also remove old legacy database if it exists
+  try {
+    indexedDB.deleteDatabase(OLD_DB_NAME);
+  } catch {
+    // safe fallback
   }
 
-  const db = await getDB();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(STORE_PROJECTS, 'readwrite');
-    const store = tx.objectStore(STORE_PROJECTS);
-    const req = store.delete(id);
-    req.onsuccess = () => resolve();
-    req.onerror = () => reject(new Error('Could not delete project.'));
-  });
+  return new Promise<{ freedBytes: number; deletedCount: number }>((resolve, reject) => {
+    const tx = db.transaction([STORE_PROJECTS, STORE_IMAGES], 'readwrite');
+    const projStore = tx.objectStore(STORE_PROJECTS);
+    const imgStore = tx.objectStore(STORE_IMAGES);
 
-  if (imageIdsToDelete.length > 0) {
-    await deleteImages(imageIdsToDelete);
+    const projReq = projStore.getAll();
+    const imgReq = imgStore.getAll();
+
+    tx.oncomplete = () => {
+      // safe completion
+    };
+
+    let done = false;
+    const checkAndClean = () => {
+      if (done) return;
+      if (projReq.readyState === 'done' && imgReq.readyState === 'done') {
+        done = true;
+        const projects: Project[] = projReq.result || [];
+        const images: StoredImageRecord[] = imgReq.result || [];
+
+        const referencedImageIds = new Set<string>();
+        for (const p of projects) {
+          if (p.pages) {
+            for (const page of p.pages) {
+              if (page.imageId) referencedImageIds.add(page.imageId);
+            }
+          }
+        }
+
+        let freedBytes = 0;
+        let deletedCount = 0;
+
+        for (const img of images) {
+          if (!referencedImageIds.has(img.id)) {
+            const size =
+              (img.originalBlob?.size || 0) +
+              (img.previewBlob?.size || 0) +
+              (img.thumbnailBlob?.size || 0);
+            freedBytes += size;
+            deletedCount++;
+            imgStore.delete(img.id);
+          }
+        }
+
+        tx.oncomplete = () => resolve({ freedBytes, deletedCount });
+      }
+    };
+
+    projReq.onsuccess = checkAndClean;
+    imgReq.onsuccess = checkAndClean;
+    tx.onerror = () => reject(new Error('Failed to clean up storage.'));
+  });
+}
+
+/**
+ * Erase Everything:
+ * Closes DB, deletes both IndexedDB databases, deletes Cache Storage entries,
+ * unregisters service workers, clears localStorage & sessionStorage, revokes URLs, and reloads.
+ */
+export async function eraseEverything(): Promise<void> {
+  if (dbInstance) {
+    dbInstance.close();
+    dbInstance = null;
+  }
+
+  // Delete IndexedDBs
+  try {
+    indexedDB.deleteDatabase(DB_NAME);
+  } catch {}
+  try {
+    indexedDB.deleteDatabase(OLD_DB_NAME);
+  } catch {}
+
+  // Delete Cache Storage
+  if (typeof caches !== 'undefined' && caches.keys) {
+    try {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    } catch {}
+  }
+
+  // Unregister Service Workers
+  if (typeof navigator !== 'undefined' && navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+    try {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(registrations.map((r) => r.unregister()));
+    } catch {}
+  }
+
+  // Clear Storage
+  try {
+    localStorage.clear();
+    sessionStorage.clear();
+  } catch {}
+
+  // Revoke Object URLs
+  revokeAllManagedObjectUrls();
+
+  // Reload the application cleanly
+  if (typeof window !== 'undefined') {
+    window.location.reload();
   }
 }
 
 /**
- * Get storage estimate
+ * Storage estimate from navigator.storage
  */
 export async function getStorageEstimate(): Promise<{ usedBytes: number; quotaBytes: number; percentage: number }> {
   if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.estimate) {
@@ -595,7 +913,7 @@ export async function getStorageEstimate(): Promise<{ usedBytes: number; quotaBy
 }
 
 export function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
+  if (bytes <= 0 || isNaN(bytes)) return '0 B';
   const k = 1024;
   const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -649,3 +967,13 @@ export async function deleteFontRecord(id: string): Promise<void> {
   });
 }
 
+export async function deleteAllFonts(): Promise<void> {
+  const db = await getDB();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_FONTS, 'readwrite');
+    const store = tx.objectStore(STORE_FONTS);
+    const req = store.clear();
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(new Error('Failed to clear custom fonts.'));
+  });
+}
