@@ -53,8 +53,17 @@ export function triggerDownload(blob: Blob, filename: string): void {
   }, 120000);
 }
 
+export interface RenderedDesignItem {
+  pageIndex: number;
+  page: DesignPage;
+  blob: Blob;
+  file: File;
+  filename: string;
+  previewUrl: string;
+}
+
 /**
- * Render a single design to a Blob at native full resolution
+ * Render a single design to a Blob at native full resolution (exact width x height)
  */
 export async function exportSingleDesign(
   project: Project,
@@ -65,19 +74,24 @@ export async function exportSingleDesign(
   const page = project.pages[pageIndex];
   if (!page) throw new Error('Design page not found.');
 
-  await preloadTemplateFonts(project.template);
+  const boxesToRender =
+    page.textBoxes && page.textBoxes.length > 0 ? page.textBoxes : project.template;
+
+  await preloadTemplateFonts(boxesToRender);
 
   const imageBlob = await getOriginalImageBlob(page.imageId);
   if (!imageBlob) throw new Error(`Could not load background image for ${page.name}`);
 
   const canvas = document.createElement('canvas');
-  canvas.width = page.width || 1000;
-  canvas.height = page.height || 1000;
+  const nativeW = page.width || 1000;
+  const nativeH = page.height || 1000;
+  canvas.width = nativeW;
+  canvas.height = nativeH;
 
-  await renderDesignToCanvas(canvas, project.template, page, imageBlob, {
+  await renderDesignToCanvas(canvas, boxesToRender, page, imageBlob, {
     showBoundingBoxes: false,
-    targetWidth: page.width || 1000,
-    targetHeight: page.height || 1000,
+    targetWidth: nativeW,
+    targetHeight: nativeH,
   });
 
   const mimeType = format === 'png' ? 'image/png' : 'image/jpeg';
@@ -85,7 +99,7 @@ export async function exportSingleDesign(
   return new Promise<Blob>((resolve, reject) => {
     canvas.toBlob(
       (b) => {
-        // Free canvas element
+        // Free canvas memory
         canvas.width = 1;
         canvas.height = 1;
         if (b) resolve(b);
@@ -95,6 +109,54 @@ export async function exportSingleDesign(
       quality
     );
   });
+}
+
+/**
+ * Render all or specific designs into File objects and preview URLs for Gallery saving
+ */
+export async function exportDesignsToFiles(
+  project: Project,
+  pageIndexes: number[],
+  format: ExportFormat = 'png',
+  quality = 0.92,
+  onProgress?: (progress: ExportProgress) => void
+): Promise<RenderedDesignItem[]> {
+  const results: RenderedDesignItem[] = [];
+  const total = pageIndexes.length;
+
+  for (let i = 0; i < total; i++) {
+    const pageIndex = pageIndexes[i];
+    const page = project.pages[pageIndex];
+    if (!page) continue;
+
+    if (onProgress) {
+      onProgress({
+        current: i + 1,
+        total,
+        statusText: `Rendering ${i + 1} of ${total} at original resolution (${page.width}×${page.height})…`,
+      });
+    }
+
+    // Yield to UI to avoid blocking
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const blob = await exportSingleDesign(project, pageIndex, format, quality);
+    const filename = generateFilename(page, pageIndex, format);
+    const mimeType = format === 'png' ? 'image/png' : 'image/jpeg';
+    const file = new File([blob], filename, { type: mimeType });
+    const previewUrl = URL.createObjectURL(blob);
+
+    results.push({
+      pageIndex,
+      page,
+      blob,
+      file,
+      filename,
+      previewUrl,
+    });
+  }
+
+  return results;
 }
 
 /**
@@ -108,8 +170,6 @@ export async function exportAllDesignsZip(
 ): Promise<Blob> {
   const total = project.pages.length;
   if (total === 0) throw new Error('No designs to export.');
-
-  await preloadTemplateFonts(project.template);
 
   const zip = new JSZip();
 

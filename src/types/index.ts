@@ -43,6 +43,7 @@ export interface DesignPage {
   width: number; // original pixel width
   height: number; // original pixel height
   values: Record<string, string>; // fieldLabel -> text value
+  textBoxes?: TextBoxTemplate[]; // Per-design text boxes (geometry & styles)
 }
 
 export interface CustomFont {

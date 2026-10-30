@@ -329,46 +329,42 @@ async function base64ToBlob(base64DataUrl: string): Promise<Blob> {
  * Migrate legacy projects into the new shared-template format
  */
 export async function migrateLegacyProject(rawProject: any): Promise<Project> {
-  // If already migrated, return
-  if (rawProject.template && Array.isArray(rawProject.template) && rawProject.pages) {
-    const isClean = rawProject.pages.every((p: any) => p.imageId && p.values);
-    if (isClean) {
-      return rawProject as Project;
-    }
-  }
+  let template: TextBoxTemplate[] = Array.isArray(rawProject.template) && rawProject.template.length > 0
+    ? rawProject.template
+    : [];
 
   const legacyPages: any[] = rawProject.pages || [];
-  let template: TextBoxTemplate[] = [];
 
-  // Extract shared template from the first page that has textBoxes
-  for (const page of legacyPages) {
-    if (page.textBoxes && Array.isArray(page.textBoxes) && page.textBoxes.length > 0) {
-      const pageW = page.originalWidth || page.width || 1000;
-      template = page.textBoxes.map((b: any, idx: number) => {
-        // scale font size to 1000px baseline
-        const scaleTo1000 = 1000 / pageW;
-        const baselineFontSize = Math.round((b.fontSize || 36) * scaleTo1000);
-        return {
-          id: b.id || `tpl_box_${idx}`,
-          fieldLabel: b.fieldLabel || `Field ${idx + 1}`,
-          x: typeof b.x === 'number' ? b.x : 10,
-          y: typeof b.y === 'number' ? b.y : 10 + idx * 15,
-          width: typeof b.width === 'number' ? b.width : 80,
-          height: typeof b.height === 'number' ? b.height : 12,
-          fontFamily: b.fontFamily || 'Plus Jakarta Sans',
-          fontSize: baselineFontSize,
-          fontWeight: b.fontWeight || '600',
-          fontStyle: b.fontStyle || 'normal',
-          textAlign: b.textAlign || 'center',
-          color: b.color || '#FFF8E7',
-          lineHeight: b.lineHeight || 1.3,
-          letterSpacing: b.letterSpacing || 0,
-          shadow: b.shadow,
-          stroke: b.stroke,
-          fill: b.fill,
-        };
-      });
-      break;
+  // Extract shared template from the first page that has textBoxes if template was empty
+  if (template.length === 0) {
+    for (const page of legacyPages) {
+      if (page.textBoxes && Array.isArray(page.textBoxes) && page.textBoxes.length > 0) {
+        const pageW = page.originalWidth || page.width || 1000;
+        template = page.textBoxes.map((b: any, idx: number) => {
+          const scaleTo1000 = 1000 / pageW;
+          const baselineFontSize = Math.round((b.fontSize || 36) * scaleTo1000);
+          return {
+            id: b.id || `tpl_box_${idx}`,
+            fieldLabel: b.fieldLabel || `Field ${idx + 1}`,
+            x: typeof b.x === 'number' ? b.x : 10,
+            y: typeof b.y === 'number' ? b.y : 10 + idx * 15,
+            width: typeof b.width === 'number' ? b.width : 80,
+            height: typeof b.height === 'number' ? b.height : 12,
+            fontFamily: b.fontFamily || 'Plus Jakarta Sans',
+            fontSize: baselineFontSize,
+            fontWeight: b.fontWeight || '600',
+            fontStyle: b.fontStyle || 'normal',
+            textAlign: b.textAlign || 'center',
+            color: b.color || '#FFF8E7',
+            lineHeight: b.lineHeight || 1.3,
+            letterSpacing: b.letterSpacing || 0,
+            shadow: b.shadow,
+            stroke: b.stroke,
+            fill: b.fill,
+          };
+        });
+        break;
+      }
     }
   }
 
@@ -376,7 +372,25 @@ export async function migrateLegacyProject(rawProject: any): Promise<Project> {
     template = createDefaultTemplate();
   }
 
-  // Migrate pages and extract images into Blobs
+  // Check if project is already completely modern and clean
+  const isAlreadyModern =
+    Array.isArray(rawProject.template) &&
+    rawProject.template.length > 0 &&
+    rawProject.pages &&
+    Array.isArray(rawProject.pages) &&
+    rawProject.pages.every(
+      (p: any) =>
+        p.imageId &&
+        p.values &&
+        Array.isArray(p.textBoxes) &&
+        p.textBoxes.length > 0
+    );
+
+  if (isAlreadyModern) {
+    return rawProject as Project;
+  }
+
+  // Migrate pages and extract images into Blobs, ensuring each page has its own textBoxes
   const newPages: DesignPage[] = [];
 
   for (let i = 0; i < legacyPages.length; i++) {
@@ -408,6 +422,33 @@ export async function migrateLegacyProject(rawProject: any): Promise<Project> {
       }
     }
 
+    // Per-design text boxes: clone from page if present, otherwise deep clone project template
+    let pageBoxes: TextBoxTemplate[];
+    if (Array.isArray(lp.textBoxes) && lp.textBoxes.length > 0 && lp.textBoxes[0].fieldLabel) {
+      const pageW = lp.originalWidth || lp.width || 1000;
+      pageBoxes = lp.textBoxes.map((b: any, idx: number) => ({
+        id: b.id || `box_${i}_${idx}`,
+        fieldLabel: b.fieldLabel || `Field ${idx + 1}`,
+        x: typeof b.x === 'number' ? b.x : 10,
+        y: typeof b.y === 'number' ? b.y : 10 + idx * 15,
+        width: typeof b.width === 'number' ? b.width : 80,
+        height: typeof b.height === 'number' ? b.height : 12,
+        fontFamily: b.fontFamily || 'Plus Jakarta Sans',
+        fontSize: b.fontSize ? (b.fontSize > 150 ? Math.round(b.fontSize * (1000 / pageW)) : b.fontSize) : 24,
+        fontWeight: b.fontWeight || '600',
+        fontStyle: b.fontStyle || 'normal',
+        textAlign: b.textAlign || 'center',
+        color: b.color || '#FFF8E7',
+        lineHeight: b.lineHeight || 1.3,
+        letterSpacing: b.letterSpacing || 0,
+        shadow: b.shadow,
+        stroke: b.stroke,
+        fill: b.fill,
+      }));
+    } else {
+      pageBoxes = JSON.parse(JSON.stringify(template));
+    }
+
     newPages.push({
       id: lp.id || `page_${Date.now()}_${i}`,
       imageId,
@@ -415,6 +456,7 @@ export async function migrateLegacyProject(rawProject: any): Promise<Project> {
       width: lp.originalWidth || lp.width || 1000,
       height: lp.originalHeight || lp.height || 1000,
       values,
+      textBoxes: pageBoxes,
     });
   }
 

@@ -66,9 +66,20 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   onUpdateProject,
 }) => {
   const [activePageIndex, setActivePageIndex] = useState<number>(0);
+
+  // Active page & its per-design text boxes (or fallback to project template)
+  const activePage: DesignPage | undefined = project.pages[activePageIndex];
+  const activeBoxes: TextBoxTemplate[] =
+    activePage?.textBoxes && activePage.textBoxes.length > 0
+      ? activePage.textBoxes
+      : project.template;
+
   const [selectedBoxId, setSelectedBoxId] = useState<string | null>(
-    project.template[0]?.id || null
+    activeBoxes[0]?.id || null
   );
+
+  // Style Scope Switch: 'this' (current design only) | 'all' (all designs)
+  const [styleScope, setStyleScope] = useState<'this' | 'all'>('this');
 
   // Bottom Sheets & Modals
   const [isSpreadsheetOpen, setIsSpreadsheetOpen] = useState(false);
@@ -91,8 +102,12 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   // Thumbnail Object URLs cache: pageId -> objectUrl
   const [thumbnailUrls, setThumbnailUrls] = useState<Record<string, string>>({});
 
-  // Background Image for Active Page
-  const [activeImageBlob, setActiveImageBlob] = useState<Blob | null>(null);
+  // Background Image strictly bound to activePage.imageId: { imageId, blob }
+  const [currentImageData, setCurrentImageData] = useState<{
+    imageId: string;
+    blob: Blob;
+  } | null>(null);
+  const [isLoadingImage, setIsLoadingImage] = useState<boolean>(false);
 
   // Canvas Refs & Dimensions
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -113,10 +128,22 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     boxH: number;
   } | null>(null);
 
-  const activePage: DesignPage | undefined = project.pages[activePageIndex];
-  const selectedBox: TextBoxTemplate | undefined = project.template.find(
-    (b) => b.id === selectedBoxId
-  );
+  const selectedBox: TextBoxTemplate | undefined =
+    activeBoxes.find((b) => b.id === selectedBoxId) || activeBoxes[0];
+
+  // Keep selectedBoxId valid when active page changes
+  useEffect(() => {
+    if (!selectedBox && activeBoxes.length > 0) {
+      setSelectedBoxId(activeBoxes[0].id);
+    }
+  }, [activeBoxes, selectedBox]);
+
+  // Page Switch Handler: Immediately clears current image to avoid showing stale background
+  const handleSelectPage = useCallback((newIndex: number) => {
+    if (newIndex === activePageIndex) return;
+    setCurrentImageData(null);
+    setActivePageIndex(newIndex);
+  }, [activePageIndex]);
 
   // Load custom fonts on mount
   useEffect(() => {
@@ -125,7 +152,6 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     });
   }, [isFontManagerOpen]);
 
-
   // Clean activePageIndex if pages change
   useEffect(() => {
     if (activePageIndex >= project.pages.length && project.pages.length > 0) {
@@ -133,22 +159,40 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     }
   }, [project.pages.length, activePageIndex]);
 
-  // Load Active Page's Original Image Blob
+  // Load Active Page's Original Image Blob with cancel token and strict ID matching
   useEffect(() => {
     if (!activePage) {
-      setActiveImageBlob(null);
+      setCurrentImageData(null);
+      setIsLoadingImage(false);
       return;
     }
+
+    const targetImageId = activePage.imageId;
+    // Clear immediately if imageId doesn't match
+    setCurrentImageData((prev) => (prev?.imageId === targetImageId ? prev : null));
+    setIsLoadingImage(true);
+
     let isCancelled = false;
-    getOriginalImageBlob(activePage.imageId).then((blob) => {
-      if (!isCancelled && blob) {
-        setActiveImageBlob(blob);
-      }
-    });
+
+    getOriginalImageBlob(targetImageId)
+      .then((blob) => {
+        if (!isCancelled && blob) {
+          setCurrentImageData({ imageId: targetImageId, blob });
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to load image blob for design:', err);
+      })
+      .finally(() => {
+        if (!isCancelled) {
+          setIsLoadingImage(false);
+        }
+      });
+
     return () => {
       isCancelled = true;
     };
-  }, [activePage?.imageId]);
+  }, [activePage?.id, activePage?.imageId]);
 
   // Load Thumbnail URLs for all pages
   useEffect(() => {
@@ -227,9 +271,15 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     }, 3000);
   };
 
-  // Render Canvas (Debounced & Screen-Resolution for 60fps)
+  // Render Canvas: Only draw when currentImageData.imageId === activePage.imageId
   const redrawCanvas = useCallback(() => {
-    if (!canvasRef.current || !activePage || !activeImageBlob || !canvasContainerRef.current) {
+    if (
+      !canvasRef.current ||
+      !activePage ||
+      !currentImageData ||
+      currentImageData.imageId !== activePage.imageId ||
+      !canvasContainerRef.current
+    ) {
       return;
     }
 
@@ -240,9 +290,9 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
     renderDesignToCanvas(
       canvasRef.current,
-      project.template,
+      activeBoxes,
       activePage,
-      activeImageBlob,
+      currentImageData.blob,
       {
         showBoundingBoxes: true,
         selectedBoxId,
@@ -250,27 +300,111 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         targetHeight: targetH,
       }
     );
-  }, [activePage, activeImageBlob, project.template, selectedBoxId]);
+  }, [activePage, currentImageData, activeBoxes, selectedBoxId]);
 
   useEffect(() => {
     redrawCanvas();
   }, [redrawCanvas]);
 
-  // Handle Updates to Shared Template
-  const handleUpdateTemplateBox = (
+  // Handle Updates to Style: This design only vs All designs
+  const handleUpdateStyle = (
     boxId: string,
     updates: Partial<TextBoxTemplate>
   ) => {
-    const updatedTemplate = project.template.map((b) =>
-      b.id === boxId ? { ...b, ...updates } : b
+    if (!activePage) return;
+    const targetBox = activeBoxes.find((b) => b.id === boxId);
+    const targetLabel = targetBox?.fieldLabel;
+
+    if (styleScope === 'this') {
+      // 1. Update ONLY the active design's text boxes
+      const updatedBoxes = activeBoxes.map((b) =>
+        b.id === boxId ? { ...b, ...updates } : b
+      );
+      const updatedPages = project.pages.map((p, idx) =>
+        idx === activePageIndex ? { ...p, textBoxes: updatedBoxes } : p
+      );
+      const updatedProj: Project = {
+        ...project,
+        pages: updatedPages,
+        updatedAt: Date.now(),
+      };
+      onUpdateProject(updatedProj);
+      triggerAutoSave(updatedProj);
+    } else {
+      // 2. Update ALL designs matching this fieldLabel, plus project.template
+      const updatedTemplate = project.template.map((b) =>
+        b.id === boxId || (targetLabel && b.fieldLabel === targetLabel)
+          ? { ...b, ...updates }
+          : b
+      );
+      const updatedPages = project.pages.map((p) => {
+        const pBoxes =
+          p.textBoxes && p.textBoxes.length > 0 ? p.textBoxes : project.template;
+        const updatedPBoxes = pBoxes.map((b) =>
+          b.id === boxId || (targetLabel && b.fieldLabel === targetLabel)
+            ? { ...b, ...updates }
+            : b
+        );
+        return {
+          ...p,
+          textBoxes: updatedPBoxes,
+        };
+      });
+      const updatedProj: Project = {
+        ...project,
+        template: updatedTemplate,
+        pages: updatedPages,
+        updatedAt: Date.now(),
+      };
+      onUpdateProject(updatedProj);
+      triggerAutoSave(updatedProj);
+    }
+  };
+
+  // Backward compatible alias for style controls
+  const handleUpdateTemplateBox = handleUpdateStyle;
+
+  // Dragging/resizing text affects ONLY the current design
+  const handleUpdateCurrentDesignBoxGeometry = (
+    boxId: string,
+    geometry: { x: number; y: number; width: number; height: number }
+  ) => {
+    if (!activePage) return;
+    const updatedBoxes = activeBoxes.map((b) =>
+      b.id === boxId ? { ...b, ...geometry } : b
+    );
+    const updatedPages = project.pages.map((p, idx) =>
+      idx === activePageIndex ? { ...p, textBoxes: updatedBoxes } : p
     );
     const updatedProj: Project = {
       ...project,
-      template: updatedTemplate,
+      pages: updatedPages,
       updatedAt: Date.now(),
     };
     onUpdateProject(updatedProj);
     triggerAutoSave(updatedProj);
+  };
+
+  // Copy this design's layout to all designs
+  const handleCopyLayoutToAllDesigns = () => {
+    if (!activePage) return;
+    const currentBoxes = activeBoxes;
+
+    const updatedPages = project.pages.map((p) => ({
+      ...p,
+      textBoxes: JSON.parse(JSON.stringify(currentBoxes)),
+    }));
+
+    const updatedProj: Project = {
+      ...project,
+      template: JSON.parse(JSON.stringify(currentBoxes)),
+      pages: updatedPages,
+      updatedAt: Date.now(),
+    };
+
+    onUpdateProject(updatedProj);
+    triggerAutoSave(updatedProj);
+    showToast('Layout copied to all designs');
   };
 
   // Handle Updates to Active Page's Text Values
@@ -295,7 +429,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     triggerAutoSave(updatedProj);
   };
 
-  // Add New Field to Template
+  // Add New Field
   const handleAddNewField = (fieldName?: string) => {
     const name =
       fieldName ||
@@ -307,7 +441,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       id: `tpl_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       fieldLabel: cleanLabel,
       x: 15,
-      y: Math.min(80, 20 + project.template.length * 10),
+      y: Math.min(80, 20 + activeBoxes.length * 10),
       width: 70,
       height: 10,
       fontFamily: 'Plus Jakarta Sans',
@@ -321,9 +455,19 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     };
 
     const updatedTemplate = [...project.template, newBox];
+    const updatedPages = project.pages.map((p) => {
+      const pBoxes =
+        p.textBoxes && p.textBoxes.length > 0 ? p.textBoxes : project.template;
+      return {
+        ...p,
+        textBoxes: [...pBoxes, JSON.parse(JSON.stringify(newBox))],
+      };
+    });
+
     const updatedProj: Project = {
       ...project,
       template: updatedTemplate,
+      pages: updatedPages,
       updatedAt: Date.now(),
     };
     onUpdateProject(updatedProj);
@@ -331,27 +475,59 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     triggerAutoSave(updatedProj);
   };
 
-  // Delete Field from Template
+  // Delete Field
   const handleDeleteField = (boxId: string) => {
-    if (project.template.length <= 1) {
-      alert('A project must have at least one text field.');
+    if (activeBoxes.length <= 1) {
+      alert('A design must have at least one text field.');
       return;
     }
-    const updatedTemplate = project.template.filter((b) => b.id !== boxId);
-    const updatedProj: Project = {
-      ...project,
-      template: updatedTemplate,
-      updatedAt: Date.now(),
-    };
-    onUpdateProject(updatedProj);
-    setSelectedBoxId(updatedTemplate[0]?.id || null);
-    triggerAutoSave(updatedProj);
+    const targetBox = activeBoxes.find((b) => b.id === boxId);
+    const targetLabel = targetBox?.fieldLabel;
+
+    if (styleScope === 'this') {
+      const updatedBoxes = activeBoxes.filter((b) => b.id !== boxId);
+      const updatedPages = project.pages.map((p, idx) =>
+        idx === activePageIndex ? { ...p, textBoxes: updatedBoxes } : p
+      );
+      const updatedProj: Project = {
+        ...project,
+        pages: updatedPages,
+        updatedAt: Date.now(),
+      };
+      onUpdateProject(updatedProj);
+      setSelectedBoxId(updatedBoxes[0]?.id || null);
+      triggerAutoSave(updatedProj);
+    } else {
+      const updatedTemplate = project.template.filter(
+        (b) => b.id !== boxId && b.fieldLabel !== targetLabel
+      );
+      const updatedPages = project.pages.map((p) => {
+        const pBoxes =
+          p.textBoxes && p.textBoxes.length > 0 ? p.textBoxes : project.template;
+        return {
+          ...p,
+          textBoxes: pBoxes.filter(
+            (b) => b.id !== boxId && b.fieldLabel !== targetLabel
+          ),
+        };
+      });
+      const updatedProj: Project = {
+        ...project,
+        template: updatedTemplate,
+        pages: updatedPages,
+        updatedAt: Date.now(),
+      };
+      onUpdateProject(updatedProj);
+      setSelectedBoxId(updatedTemplate[0]?.id || null);
+      triggerAutoSave(updatedProj);
+    }
   };
 
-  // Upload Designs (Batch or Single)
+  // Upload Designs: New designs start as a copy of the current design's layout
   const handleUploadFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
 
+    const currentLayout = activeBoxes;
     const newPages: DesignPage[] = [];
 
     for (let i = 0; i < files.length; i++) {
@@ -368,6 +544,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
           width: stored.width,
           height: stored.height,
           values: {},
+          textBoxes: JSON.parse(JSON.stringify(currentLayout)),
         });
       } catch (err) {
         console.error('Failed to store uploaded design:', err);
@@ -496,12 +673,12 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       }
     }
 
-    // 2. Otherwise hit-test all template boxes (top-most first)
+    // 2. Otherwise hit-test all active boxes for current design (top-most first)
     const clickXPercent = (mousePxX / rect.width) * 100;
     const clickYPercent = (mousePxY / rect.height) * 100;
 
-    for (let i = project.template.length - 1; i >= 0; i--) {
-      const b = project.template[i];
+    for (let i = activeBoxes.length - 1; i >= 0; i--) {
+      const b = activeBoxes[i];
       if (
         clickXPercent >= b.x &&
         clickXPercent <= b.x + b.width &&
@@ -576,7 +753,8 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         break;
     }
 
-    handleUpdateTemplateBox(selectedBoxId, { x: newX, y: newY, width: newW, height: newH });
+    // Dragging/resizing text affects ONLY the current design
+    handleUpdateCurrentDesignBoxGeometry(selectedBoxId, { x: newX, y: newY, width: newW, height: newH });
   };
 
   const handleCanvasPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -672,7 +850,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
           {project.pages.length > 0 && (
             <div className="flex items-center justify-between w-full max-w-lg px-2">
               <button
-                onClick={() => setActivePageIndex((prev) => Math.max(0, prev - 1))}
+                onClick={() => handleSelectPage(Math.max(0, activePageIndex - 1))}
                 disabled={activePageIndex === 0}
                 className="p-2 rounded-xl bg-[#17171C] border border-[#262632] text-[#FFF8E7]/70 hover:text-white disabled:opacity-30 transition-all min-h-[44px] min-w-[44px] flex items-center justify-center"
               >
@@ -685,8 +863,8 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
               <button
                 onClick={() =>
-                  setActivePageIndex((prev) =>
-                    Math.min(project.pages.length - 1, prev + 1)
+                  handleSelectPage(
+                    Math.min(project.pages.length - 1, activePageIndex + 1)
                   )
                 }
                 disabled={activePageIndex === project.pages.length - 1}
@@ -719,14 +897,24 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                 </button>
               </div>
             ) : (
-              <canvas
-                ref={canvasRef}
-                onPointerDown={handleCanvasPointerDown}
-                onPointerMove={handleCanvasPointerMove}
-                onPointerUp={handleCanvasPointerUp}
-                style={{ touchAction: 'none' }}
-                className="cursor-move max-w-full h-auto rounded-xl shadow-lg"
-              />
+              <div className="relative w-full flex items-center justify-center">
+                {(!currentImageData || currentImageData.imageId !== activePage?.imageId) && (
+                  <div className="absolute inset-0 bg-[#121217] flex flex-col items-center justify-center gap-2 z-10 rounded-xl">
+                    <div className="w-6 h-6 border-2 border-[#D4AF37] border-t-transparent rounded-full animate-spin" />
+                    <span className="text-[11px] font-mono text-[#D4AF37]">
+                      Loading Design {activePageIndex + 1}…
+                    </span>
+                  </div>
+                )}
+                <canvas
+                  ref={canvasRef}
+                  onPointerDown={handleCanvasPointerDown}
+                  onPointerMove={handleCanvasPointerMove}
+                  onPointerUp={handleCanvasPointerUp}
+                  style={{ touchAction: 'none' }}
+                  className="cursor-move max-w-full h-auto rounded-xl shadow-lg"
+                />
+              </div>
             )}
           </div>
         </div>
@@ -754,7 +942,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                   : 'text-[#FFF8E7]/60'
               }`}
             >
-              Shared Style & Layout
+              Style & Layout
             </button>
           </div>
 
@@ -777,7 +965,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
               </button>
             </div>
 
-            {project.template.map((box) => {
+            {activeBoxes.map((box) => {
               const val =
                 activePage?.values[box.fieldLabel] !== undefined
                   ? activePage.values[box.fieldLabel]
@@ -823,7 +1011,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
             })}
           </div>
 
-          {/* Section 2: Shared Template Style Panel */}
+          {/* Section 2: Text Box Style Panel with Scope Switch */}
           {selectedBox && (
             <div
               className={`bg-[#17171C] border border-[#262632] rounded-2xl p-4 space-y-3.5 ${
@@ -834,8 +1022,59 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                 <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider">
                   Style: {selectedBox.fieldLabel}
                 </h3>
-                <span className="text-[10px] text-[#FFF8E7]/40">Applies to all designs</span>
+                <span className="text-[10px] text-[#FFF8E7]/40 font-mono">
+                  Design {activePageIndex + 1} of {project.pages.length}
+                </span>
               </div>
+
+              {/* Style Scope Switch (Canva-style: This design only vs All designs) */}
+              <div className="bg-[#121217] p-1.5 rounded-xl border border-[#2D2D38] space-y-1.5">
+                <div className="flex items-center justify-between px-1">
+                  <span className="text-[11px] font-semibold text-[#D4AF37]">Apply Changes To:</span>
+                  <span className="text-[10px] text-[#FFF8E7]/50 font-mono">
+                    {styleScope === 'this'
+                      ? 'This design only'
+                      : `All ${project.pages.length} designs`}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setStyleScope('this')}
+                    className={`py-1.5 px-2 rounded-lg text-xs font-semibold transition-all min-h-[36px] flex items-center justify-center gap-1.5 ${
+                      styleScope === 'this'
+                        ? 'bg-[#D4AF37] text-[#0B0B0F] font-bold shadow-sm'
+                        : 'text-[#FFF8E7]/70 hover:text-white'
+                    }`}
+                  >
+                    <Sliders className="w-3.5 h-3.5" />
+                    <span>This design only</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setStyleScope('all')}
+                    className={`py-1.5 px-2 rounded-lg text-xs font-semibold transition-all min-h-[36px] flex items-center justify-center gap-1.5 ${
+                      styleScope === 'all'
+                        ? 'bg-[#D4AF37] text-[#0B0B0F] font-bold shadow-sm'
+                        : 'text-[#FFF8E7]/70 hover:text-white'
+                    }`}
+                  >
+                    <Layers className="w-3.5 h-3.5" />
+                    <span>All designs</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Copy this design's layout to all designs button */}
+              <button
+                type="button"
+                onClick={handleCopyLayoutToAllDesigns}
+                className="w-full bg-[#1C1C24] hover:bg-[#262632] border border-[#D4AF37]/40 hover:border-[#D4AF37] text-[#D4AF37] text-xs font-semibold py-2.5 px-3 rounded-xl flex items-center justify-center gap-2 transition-all min-h-[42px]"
+                title="Copy box positions, sizes, and styles from this design to all other designs"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>Copy this design's layout to all designs</span>
+              </button>
 
               {/* 1. Font Family & Font Manager Utility */}
               <div className="space-y-1.5">
@@ -1173,7 +1412,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
             return (
               <button
                 key={page.id}
-                onClick={() => setActivePageIndex(idx)}
+                onClick={() => handleSelectPage(idx)}
                 className={`relative shrink-0 rounded-xl overflow-hidden border-2 transition-all min-h-[44px] ${
                   isActive
                     ? 'border-[#D4AF37] ring-2 ring-[#D4AF37]/30 scale-105'

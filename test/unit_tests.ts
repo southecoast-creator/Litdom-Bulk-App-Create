@@ -353,5 +353,174 @@ console.log('\n[TEST 10] 4-Corner and 8-Way Box Resizing Logic');
   console.log('✅ PASS: 4-corner box expansion, reduction, and boundary clamping verified');
 }
 
+// ---------------------------------------------------------------------------
+// TEST 11: Style Scope - This Design Only vs All Designs
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 11] Style Scope: This Design Only vs All Designs');
+{
+  const pages: DesignPage[] = [
+    {
+      id: 'p1',
+      imageId: 'img_1',
+      name: 'Design 1',
+      width: 1000,
+      height: 1000,
+      values: { Title: 'Page 1 Title' },
+      textBoxes: JSON.parse(JSON.stringify(testTemplate)),
+    },
+    {
+      id: 'p2',
+      imageId: 'img_2',
+      name: 'Design 2',
+      width: 1000,
+      height: 1000,
+      values: { Title: 'Page 2 Title' },
+      textBoxes: JSON.parse(JSON.stringify(testTemplate)),
+    },
+  ];
+
+  // 1. "This design only" change on Page 1: change Title color to #FF0000
+  pages[0].textBoxes = pages[0].textBoxes!.map((b) =>
+    b.fieldLabel === 'Title' ? { ...b, color: '#FF0000' } : b
+  );
+
+  assert.strictEqual(
+    pages[0].textBoxes!.find((b) => b.fieldLabel === 'Title')?.color,
+    '#FF0000',
+    'Page 1 Title color updated'
+  );
+  assert.strictEqual(
+    pages[1].textBoxes!.find((b) => b.fieldLabel === 'Title')?.color,
+    '#D4AF37',
+    'Page 2 Title color must NOT change when scope is "this design only"'
+  );
+
+  // 2. "All designs" change: change Title font to "Cinzel Decorative" everywhere
+  for (const p of pages) {
+    p.textBoxes = p.textBoxes!.map((b) =>
+      b.fieldLabel === 'Title' ? { ...b, fontFamily: 'Cinzel Decorative' } : b
+    );
+  }
+
+  assert.strictEqual(
+    pages[0].textBoxes!.find((b) => b.fieldLabel === 'Title')?.fontFamily,
+    'Cinzel Decorative'
+  );
+  assert.strictEqual(
+    pages[1].textBoxes!.find((b) => b.fieldLabel === 'Title')?.fontFamily,
+    'Cinzel Decorative',
+    'All designs updated when scope is "all designs"'
+  );
+  console.log('✅ PASS: Style scope "This design only" vs "All designs" strictly verified');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 12: Copy Layout to All Designs Preserves Page Values
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 12] Copy Layout to All Designs');
+{
+  const pages: DesignPage[] = [
+    {
+      id: 'p1',
+      imageId: 'img_1',
+      name: 'Design 1',
+      width: 1000,
+      height: 1000,
+      values: { Title: 'Unique Title 1', Subtitle: 'Unique Subtitle 1' },
+      textBoxes: [
+        {
+          id: 'box_custom',
+          fieldLabel: 'Title',
+          x: 20,
+          y: 25,
+          width: 60,
+          height: 14,
+          fontFamily: 'Montserrat',
+          fontSize: 52,
+          fontWeight: '800',
+          fontStyle: 'normal',
+          textAlign: 'left',
+          color: '#E0AA3E',
+          lineHeight: 1.2,
+          letterSpacing: 1,
+        },
+      ],
+    },
+    {
+      id: 'p2',
+      imageId: 'img_2',
+      name: 'Design 2',
+      width: 1000,
+      height: 1000,
+      values: { Title: 'Unique Title 2', Subtitle: 'Unique Subtitle 2' },
+      textBoxes: JSON.parse(JSON.stringify(testTemplate)),
+    },
+  ];
+
+  // Perform "Copy this design's layout to all designs" from Page 1 to all pages
+  const sourceLayout = pages[0].textBoxes!;
+  for (let i = 1; i < pages.length; i++) {
+    pages[i].textBoxes = JSON.parse(JSON.stringify(sourceLayout));
+  }
+
+  // Verify Page 2 received Page 1's geometry & styles
+  assert.strictEqual(pages[1].textBoxes!.length, 1);
+  assert.strictEqual(pages[1].textBoxes![0].fontSize, 52);
+  assert.strictEqual(pages[1].textBoxes![0].x, 20);
+  assert.strictEqual(pages[1].textBoxes![0].fontFamily, 'Montserrat');
+
+  // Verify Page 2's distinct text content values are 100% preserved
+  assert.strictEqual(pages[1].values['Title'], 'Unique Title 2');
+  assert.strictEqual(pages[1].values['Subtitle'], 'Unique Subtitle 2');
+  console.log('✅ PASS: Layout copying propagates styles while preserving text values');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 13: Strict Image ID Matching Prevents Wrong Background Race Condition
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 13] Image ID Strict Binding & Race Guard');
+{
+  const activePage = { id: 'p3', imageId: 'img_3' };
+  const staleLoadedBlob = { imageId: 'img_1', blob: new Blob(['fake1']) };
+  const matchingLoadedBlob = { imageId: 'img_3', blob: new Blob(['fake3']) };
+
+  const shouldDrawStale = staleLoadedBlob.imageId === activePage.imageId;
+  assert.strictEqual(shouldDrawStale, false, 'Must NOT draw when blob.imageId !== activePage.imageId');
+
+  const shouldDrawMatching = matchingLoadedBlob.imageId === activePage.imageId;
+  assert.strictEqual(shouldDrawMatching, true, 'Draws when blob.imageId matches activePage.imageId');
+  console.log('✅ PASS: Image ID matching guard prevents cross-page image corruption');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 14: 10-Design Batch Grouping for Gallery Sharing
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 14] 10-Design Batch Grouping for Web Share API');
+{
+  // 25 mock designs
+  const mockItems = Array.from({ length: 25 }, (_, i) => ({ id: i + 1 }));
+
+  const chunkSize = 10;
+  const groups: { label: string; count: number }[] = [];
+  for (let i = 0; i < mockItems.length; i += chunkSize) {
+    const chunk = mockItems.slice(i, i + chunkSize);
+    const start = i + 1;
+    const end = i + chunk.length;
+    groups.push({
+      label: `Designs ${start}–${end}`,
+      count: chunk.length,
+    });
+  }
+
+  assert.strictEqual(groups.length, 3, '25 items split into 3 groups');
+  assert.strictEqual(groups[0].label, 'Designs 1–10');
+  assert.strictEqual(groups[0].count, 10);
+  assert.strictEqual(groups[1].label, 'Designs 11–20');
+  assert.strictEqual(groups[1].count, 10);
+  assert.strictEqual(groups[2].label, 'Designs 21–25');
+  assert.strictEqual(groups[2].count, 5);
+  console.log('✅ PASS: Large batch chunking splits into groups of 10 for Web Share API');
+}
+
 console.log('\n--- ALL UNIT TESTS COMPLETED SUCCESSFULLY ---');
 

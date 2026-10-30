@@ -138,10 +138,19 @@ export const SpreadsheetSheet: React.FC<SpreadsheetSheetProps> = ({
       newMappings
     );
 
+    const updatedPages = population.pages.map((p) => {
+      const pBoxes =
+        p.textBoxes && p.textBoxes.length > 0 ? p.textBoxes : project.template;
+      return {
+        ...p,
+        textBoxes: [...pBoxes, JSON.parse(JSON.stringify(newBox))],
+      };
+    });
+
     const updatedProject: Project = {
       ...project,
       template: newTemplate,
-      pages: population.pages,
+      pages: updatedPages,
       lastSpreadsheet: currentSheet
         ? {
             ...currentSheet,
@@ -160,6 +169,11 @@ export const SpreadsheetSheet: React.FC<SpreadsheetSheetProps> = ({
     const needed = currentSheet.rows.length - project.pages.length;
     if (needed <= 0) return;
 
+    const layoutToCopy =
+      lastPage.textBoxes && lastPage.textBoxes.length > 0
+        ? lastPage.textBoxes
+        : project.template;
+
     const newPages = [...project.pages];
     for (let i = 0; i < needed; i++) {
       const idx = project.pages.length + i;
@@ -170,6 +184,7 @@ export const SpreadsheetSheet: React.FC<SpreadsheetSheetProps> = ({
         width: lastPage.width,
         height: lastPage.height,
         values: {},
+        textBoxes: JSON.parse(JSON.stringify(layoutToCopy)),
       });
     }
 

@@ -146,10 +146,14 @@ export async function renderDesignToCanvas(
   imageSrcOrBlob: string | Blob,
   options: RenderCanvasOptions = {}
 ): Promise<void> {
-  // Ensure fonts are explicitly loaded
-  await preloadTemplateFonts(template);
+  // Use per-design text boxes if available, otherwise fallback to template
+  const boxesToRender =
+    page.textBoxes && page.textBoxes.length > 0 ? page.textBoxes : template;
 
-  // Load decoded background image
+  // Ensure fonts are explicitly loaded
+  await preloadTemplateFonts(boxesToRender);
+
+  // Load decoded background image strictly under page.imageId
   const img = await getOrLoadDecodedImage(page.imageId, imageSrcOrBlob);
 
   const nativeW = page.width || img.naturalWidth || 1000;
@@ -176,7 +180,7 @@ export async function renderDesignToCanvas(
   const scale = targetW / 1000;
 
   // 3. Render Text Boxes
-  for (const box of template) {
+  for (const box of boxesToRender) {
     const rawContent = page.values[box.fieldLabel];
     // If undefined, default to fieldLabel or placeholder; if empty string, render nothing
     const content = rawContent !== undefined ? rawContent : box.fieldLabel;
