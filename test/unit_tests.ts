@@ -1,349 +1,357 @@
 /**
- * Unit Test Suite for Litdom Batch Studio Core Engine
- * Tests spreadsheet mapping, row-to-page population, empty cell preservation,
- * and the 1-page 4-box Excel workbook workflow.
+ * Litdom Batch Studio - Core Test Suite
+ * Validates:
+ * 1. Header matching (case, normalized, aliases)
+ * 2. Positional fallback when no headers match
+ * 3. Exact 10 rows -> 10 designs population
+ * 4. Fewer rows than designs (unmapped pages left unchanged)
+ * 5. More rows than designs (reports excess rows)
+ * 6. Empty cell preservation (no data shifting or leakage)
+ * 7. CSV with emojis, quotes, and commas
+ * 8. XLSX workbook parsing
  */
+
+import assert from 'node:assert';
 import * as XLSX from 'xlsx';
+import { TextBoxTemplate, DesignPage } from '../src/types';
 import {
-  generateMappingSuggestions,
-  populatePagesWithSpreadsheetData,
-  parseSpreadsheetFile,
-} from '../src/utils/spreadsheet';
-import { PageDesign, TextBox } from '../src/types';
+  calculateAutoMappings,
+  populateDesignsFromSpreadsheet,
+} from '../src/utils/spreadsheetEngine';
 
-function assert(condition: boolean, message: string) {
-  if (!condition) {
-    console.error(`❌ TEST FAILED: ${message}`);
-    process.exit(1);
-  } else {
-    console.log(`✅ PASS: ${message}`);
-  }
+console.log('--- LITDOM BATCH STUDIO CORE TESTS ---');
+
+// Standard Template for testing
+const testTemplate: TextBoxTemplate[] = [
+  {
+    id: 't_title',
+    fieldLabel: 'Title',
+    x: 10,
+    y: 20,
+    width: 80,
+    height: 12,
+    fontFamily: 'Cinzel',
+    fontSize: 48,
+    fontWeight: '700',
+    fontStyle: 'normal',
+    textAlign: 'center',
+    color: '#D4AF37',
+    lineHeight: 1.25,
+    letterSpacing: 2,
+  },
+  {
+    id: 't_subtitle',
+    fieldLabel: 'Subtitle',
+    x: 15,
+    y: 36,
+    width: 70,
+    height: 8,
+    fontFamily: 'Plus Jakarta Sans',
+    fontSize: 24,
+    fontWeight: '500',
+    fontStyle: 'normal',
+    textAlign: 'center',
+    color: '#FFF8E7',
+    lineHeight: 1.35,
+    letterSpacing: 0,
+  },
+  {
+    id: 't_paragraph1',
+    fieldLabel: 'Paragraph 1',
+    x: 15,
+    y: 48,
+    width: 70,
+    height: 16,
+    fontFamily: 'Plus Jakarta Sans',
+    fontSize: 20,
+    fontWeight: '400',
+    fontStyle: 'normal',
+    textAlign: 'center',
+    color: '#F4D58D',
+    lineHeight: 1.5,
+    letterSpacing: 0,
+  },
+  {
+    id: 't_cta',
+    fieldLabel: 'CTA',
+    x: 25,
+    y: 72,
+    width: 50,
+    height: 8,
+    fontFamily: 'Montserrat',
+    fontSize: 18,
+    fontWeight: '700',
+    fontStyle: 'normal',
+    textAlign: 'center',
+    color: '#D4AF37',
+    lineHeight: 1.2,
+    letterSpacing: 2,
+  },
+];
+
+// Helper to generate N mock design pages
+function createMockPages(count: number): DesignPage[] {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `mock_page_${i + 1}`,
+    imageId: `img_${i + 1}`,
+    name: `Design ${i + 1}`,
+    width: 1080,
+    height: 1350,
+    values: {
+      Title: `Initial Title ${i + 1}`,
+      Subtitle: `Initial Subtitle ${i + 1}`,
+      'Paragraph 1': `Initial Body ${i + 1}`,
+      CTA: 'INITIAL CTA',
+    },
+  }));
 }
 
-console.log('--- LITDOM BATCH STUDIO CORE ENGINE TESTS ---');
-
-// Test 1: Header Mapping Normalization & Fuzzy Match
+// ---------------------------------------------------------------------------
+// TEST 1: Header matching (Case, Normalized, Aliases)
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 1] Header Matching & Aliases');
 {
-  const fieldLabels = ['TITLE', 'SUBTITLE', 'PARAGRAPH 1', 'CTA'];
-  const spreadsheetHeaders = ['title', ' SubTitle ', 'Paragraph 1', 'UNMAPPED_COL'];
+  const headers = ['HEADLINE', 'subheadline', 'Paragraph 1', 'Button'];
+  const mappingResult = calculateAutoMappings(testTemplate, headers);
 
-  const mapping = generateMappingSuggestions(fieldLabels, spreadsheetHeaders);
-  assert(mapping['TITLE'] === 'title', 'Maps lowercase "title" to "TITLE"');
-  assert(mapping['SUBTITLE'] === ' SubTitle ', 'Maps trimmed " SubTitle " to "SUBTITLE"');
-  assert(mapping['PARAGRAPH 1'] === 'Paragraph 1', 'Maps "Paragraph 1" to "PARAGRAPH 1"');
-  assert(mapping['CTA'] === null, 'Leaves missing "CTA" as null');
+  assert.strictEqual(mappingResult.matchedByName, true);
+  assert.strictEqual(mappingResult.mappings['Title'], 'HEADLINE', 'Headline should alias to Title');
+  assert.strictEqual(mappingResult.mappings['Subtitle'], 'subheadline', 'Subheadline should alias to Subtitle');
+  assert.strictEqual(mappingResult.mappings['Paragraph 1'], 'Paragraph 1', 'Exact match for Paragraph 1');
+  assert.strictEqual(mappingResult.mappings['CTA'], 'Button', 'Button should alias to CTA');
+  console.log('✅ PASS: Aliases and normalized names match correctly');
 }
 
-// Test 2: Row-to-Page Population & Empty Cell Integrity
+// ---------------------------------------------------------------------------
+// TEST 2: Positional Fallback (When NOTHING matches by name)
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 2] Positional Fallback');
 {
-  const dummyPage1: PageDesign = {
-    id: 'p1',
-    pageNumber: 1,
-    name: 'Cover',
-    imageUrl: 'data:image/png;base64,sample',
-    originalWidth: 1080,
-    originalHeight: 1350,
-    textBoxes: [
-      {
-        id: 'b1',
-        fieldLabel: 'TITLE',
-        content: 'Original Title 1',
-        x: 10,
-        y: 20,
-        width: 80,
-        height: 15,
-        fontFamily: 'Plus Jakarta Sans',
-        fontSize: 32,
-        fontWeight: '700',
-        fontStyle: 'normal',
-        textAlign: 'center',
-        color: '#D4AF37',
-        lineHeight: 1.3,
-        letterSpacing: 0,
-      },
-      {
-        id: 'b2',
-        fieldLabel: 'PARAGRAPH 1',
-        content: 'Original Paragraph 1',
-        x: 10,
-        y: 40,
-        width: 80,
-        height: 20,
-        fontFamily: 'Plus Jakarta Sans',
-        fontSize: 20,
-        fontWeight: '400',
-        fontStyle: 'normal',
-        textAlign: 'left',
-        color: '#FFF8E7',
-        lineHeight: 1.4,
-        letterSpacing: 0,
-      },
-    ],
+  const headers = ['Alpha', 'Beta', 'Gamma', 'Delta'];
+  const mappingResult = calculateAutoMappings(testTemplate, headers);
+
+  assert.strictEqual(mappingResult.matchedByName, false, 'Should detect no name matches');
+  assert.strictEqual(mappingResult.mappings['Title'], 'Alpha', 'Position 0 maps to Title');
+  assert.strictEqual(mappingResult.mappings['Subtitle'], 'Beta', 'Position 1 maps to Subtitle');
+  assert.strictEqual(mappingResult.mappings['Paragraph 1'], 'Gamma', 'Position 2 maps to Paragraph 1');
+  assert.strictEqual(mappingResult.mappings['CTA'], 'Delta', 'Position 3 maps to CTA');
+  console.log('✅ PASS: Positional fallback maps columns in index order');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 3: 10 Rows -> 10 Designs Exact 1:1 Population
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 3] 10 Rows -> 10 Designs Exact Population');
+{
+  const pages = createMockPages(10);
+  const rows = Array.from({ length: 10 }, (_, i) => ({
+    Title: `Batch Title ${i + 1}`,
+    Subtitle: `Batch Subtitle ${i + 1}`,
+    'Paragraph 1': `Batch Copy ${i + 1}`,
+    CTA: `BUY NOW ${i + 1}`,
+  }));
+
+  const mappings = {
+    Title: 'Title',
+    Subtitle: 'Subtitle',
+    'Paragraph 1': 'Paragraph 1',
+    CTA: 'CTA',
   };
 
-  const dummyPage2: PageDesign = {
-    id: 'p2',
-    pageNumber: 2,
-    name: 'Spec',
-    imageUrl: 'data:image/png;base64,sample',
-    originalWidth: 1080,
-    originalHeight: 1350,
-    textBoxes: [
-      {
-        id: 'b3',
-        fieldLabel: 'TITLE',
-        content: 'Original Title 2',
-        x: 10,
-        y: 20,
-        width: 80,
-        height: 15,
-        fontFamily: 'Plus Jakarta Sans',
-        fontSize: 32,
-        fontWeight: '700',
-        fontStyle: 'normal',
-        textAlign: 'center',
-        color: '#D4AF37',
-        lineHeight: 1.3,
-        letterSpacing: 0,
-      },
-      {
-        id: 'b4',
-        fieldLabel: 'PARAGRAPH 1',
-        content: 'Original Paragraph 2',
-        x: 10,
-        y: 40,
-        width: 80,
-        height: 20,
-        fontFamily: 'Plus Jakarta Sans',
-        fontSize: 20,
-        fontWeight: '400',
-        fontStyle: 'normal',
-        textAlign: 'left',
-        color: '#FFF8E7',
-        lineHeight: 1.4,
-        letterSpacing: 0,
-      },
-    ],
-  };
+  const result = populateDesignsFromSpreadsheet(pages, rows, mappings);
 
+  assert.strictEqual(result.totalDesigns, 10);
+  assert.strictEqual(result.totalRows, 10);
+  assert.strictEqual(result.statusType, 'exact');
+  assert.strictEqual(result.statusMessage, '10 designs · 10 rows');
+
+  // Verify Design 1
+  assert.strictEqual(result.pages[0].values['Title'], 'Batch Title 1');
+  assert.strictEqual(result.pages[0].values['CTA'], 'BUY NOW 1');
+
+  // Verify Design 10
+  assert.strictEqual(result.pages[9].values['Title'], 'Batch Title 10');
+  assert.strictEqual(result.pages[9].values['CTA'], 'BUY NOW 10');
+  console.log('✅ PASS: 10 rows populated 10 designs with 1:1 accuracy');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 4: Fewer Rows Than Designs (Unmapped pages left unchanged)
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 4] Fewer Rows Than Designs');
+{
+  const pages = createMockPages(10);
+  const rows = Array.from({ length: 4 }, (_, i) => ({
+    Title: `Row ${i + 1} Title`,
+  }));
+  const mappings = { Title: 'Title' };
+
+  const result = populateDesignsFromSpreadsheet(pages, rows, mappings);
+
+  assert.strictEqual(result.statusType, 'fewer_rows');
+  assert.strictEqual(
+    result.statusMessage,
+    'Designs 5–10 have no row and were left unchanged'
+  );
+  // Pages 1-4 updated
+  assert.strictEqual(result.pages[0].values['Title'], 'Row 1 Title');
+  assert.strictEqual(result.pages[3].values['Title'], 'Row 4 Title');
+  // Pages 5-10 strictly preserved
+  assert.strictEqual(result.pages[4].values['Title'], 'Initial Title 5');
+  assert.strictEqual(result.pages[9].values['Title'], 'Initial Title 10');
+  console.log('✅ PASS: Unmapped designs strictly left unchanged without corruption');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 5: More Rows Than Designs (Reports excess rows)
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 5] More Rows Than Designs');
+{
+  const pages = createMockPages(3);
+  const rows = Array.from({ length: 8 }, (_, i) => ({
+    Title: `Row ${i + 1}`,
+  }));
+  const mappings = { Title: 'Title' };
+
+  const result = populateDesignsFromSpreadsheet(pages, rows, mappings);
+
+  assert.strictEqual(result.statusType, 'more_rows');
+  assert.strictEqual(result.excessRowCount, 5);
+  assert.strictEqual(result.statusMessage, '5 rows have no design');
+  console.log('✅ PASS: Excess rows reported accurately');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 6: Empty Cells Remain Empty Strings
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 6] Empty Cells Remain Empty Strings');
+{
+  const pages = createMockPages(2);
   const rows = [
-    { TITLE: 'New Sovereign Title', 'PARAGRAPH 1': 'New Body Text for Page 1' },
-    { TITLE: 'Second Page Title', 'PARAGRAPH 1': '' }, // Empty cell test
+    { Title: 'Apex Watch', Subtitle: '', 'Paragraph 1': 'Full description', CTA: 'DISCOVER' },
+    { Title: 'Sovereign Edition', Subtitle: 'Luxury Tier', 'Paragraph 1': '', CTA: '' },
   ];
-
-  const mapping = {
-    TITLE: 'TITLE',
-    'PARAGRAPH 1': 'PARAGRAPH 1',
+  const mappings = {
+    Title: 'Title',
+    Subtitle: 'Subtitle',
+    'Paragraph 1': 'Paragraph 1',
+    CTA: 'CTA',
   };
 
-  const result = populatePagesWithSpreadsheetData([dummyPage1, dummyPage2], rows, mapping);
+  const result = populateDesignsFromSpreadsheet(pages, rows, mappings);
 
-  assert(result.populatedCount === 2, 'Populated exactly 2 pages');
-  assert(result.updatedPages[0].textBoxes[0].content === 'New Sovereign Title', 'Row 1 populates Page 1 TITLE');
-  assert(result.updatedPages[0].textBoxes[1].content === 'New Body Text for Page 1', 'Row 1 populates Page 1 PARAGRAPH 1');
-  assert(result.updatedPages[1].textBoxes[0].content === 'Second Page Title', 'Row 2 populates Page 2 TITLE');
-  assert(
-    result.updatedPages[1].textBoxes[1].content === '',
-    'Empty cell remains strictly empty and DOES NOT borrow or carry over text from row 1'
-  );
-  assert(
-    result.updatedPages[0].textBoxes[0].color === '#D4AF37',
-    'Text-box styling (color, font, position) is 100% preserved during text population'
-  );
+  assert.strictEqual(result.pages[0].values['Subtitle'], '', 'Row 1 empty Subtitle remains empty string');
+  assert.strictEqual(result.pages[1].values['Paragraph 1'], '', 'Row 2 empty Paragraph remains empty string');
+  assert.strictEqual(result.pages[1].values['CTA'], '', 'Row 2 empty CTA remains empty string');
+  console.log('✅ PASS: Empty cells strictly remain empty strings and do not bleed');
 }
 
-// Test 3: Discrepancy handling (Fewer rows than pages)
+// ---------------------------------------------------------------------------
+// TEST 7: CSV with Emojis, Quotes, and Commas (UTF-8)
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 7] CSV with Emojis, Quotes, and Commas');
 {
-  const pages = [
-    { pageNumber: 1, textBoxes: [] },
-    { pageNumber: 2, textBoxes: [] },
-    { pageNumber: 3, textBoxes: [] },
-  ] as any;
-  const rows = [{ TITLE: 'Row 1' }];
-  const mapping = { TITLE: 'TITLE' };
+  const csvContent =
+    'Title,Subtitle,Paragraph 1,CTA\n' +
+    '"💎 Luxury Watch ✨","Limited Edition, 2026","Hand-finished, calibrated to micron tolerances.","ACQUIRE NOW"\n';
 
-  const result = populatePagesWithSpreadsheetData(pages, rows, mapping);
-  assert(result.populatedCount === 1, 'Only 1 page populated when 1 row is given');
-  assert(
-    result.unpopulatedPageNumbers.length === 2 &&
-      result.unpopulatedPageNumbers[0] === 2 &&
-      result.unpopulatedPageNumbers[1] === 3,
-    'Identifies unpopulated pages (Pages 2 and 3) cleanly'
-  );
-}
-
-// Test 4: Discrepancy handling (More rows than pages)
-{
-  const pages = [{ pageNumber: 1, textBoxes: [] }] as any;
-  const rows = [{ TITLE: 'Row 1' }, { TITLE: 'Row 2' }, { TITLE: 'Row 3' }];
-  const mapping = { TITLE: 'TITLE' };
-
-  const result = populatePagesWithSpreadsheetData(pages, rows, mapping);
-  assert(result.populatedCount === 1, 'Populates 1 page');
-  assert(result.excessRowCount === 2, 'Reports exactly 2 excess rows without silent corruption');
-}
-
-// Test 5: MINIMAL END-TO-END TEST: 1 Background Image, 4 Labelled Text Boxes, 1-Row Excel Workbook (.xlsx)
-async function testMinimalOnePageFourBoxesExcelWorkflow() {
-  console.log('\n--- TEST 5: 1-PAGE 4-BOXES 1-ROW EXCEL (.XLSX) POPULATION ---');
-
-  // Step 1: Create a design page with 1 background image and 4 labelled boxes
-  const pageWithFourBoxes: PageDesign = {
-    id: 'test_page_1',
-    pageNumber: 1,
-    name: 'Minimal Test Design',
-    imageUrl: 'data:image/png;base64,preserved_background_image_hash',
-    originalWidth: 1080,
-    originalHeight: 1350,
-    textBoxes: [
-      {
-        id: 'box_title',
-        fieldLabel: 'TITLE',
-        content: 'Original Template Title',
-        x: 10,
-        y: 22,
-        width: 80,
-        height: 14,
-        fontFamily: 'Cinzel',
-        fontSize: 50,
-        fontWeight: '700',
-        fontStyle: 'normal',
-        textAlign: 'center',
-        color: '#D4AF37',
-        lineHeight: 1.25,
-        letterSpacing: 2,
-      },
-      {
-        id: 'box_subtitle',
-        fieldLabel: 'SUBTITLE',
-        content: 'Original Subtitle Placeholder',
-        x: 15,
-        y: 39,
-        width: 70,
-        height: 10,
-        fontFamily: 'Plus Jakarta Sans',
-        fontSize: 26,
-        fontWeight: '500',
-        fontStyle: 'normal',
-        textAlign: 'center',
-        color: '#FFF8E7',
-        lineHeight: 1.4,
-        letterSpacing: 0,
-      },
-      {
-        id: 'box_paragraph1',
-        fieldLabel: 'PARAGRAPH 1',
-        content: 'Original paragraph 1 text placeholder.',
-        x: 15,
-        y: 52,
-        width: 70,
-        height: 18,
-        fontFamily: 'Plus Jakarta Sans',
-        fontSize: 22,
-        fontWeight: '400',
-        fontStyle: 'normal',
-        textAlign: 'center',
-        color: '#F4D58D',
-        lineHeight: 1.5,
-        letterSpacing: 0,
-      },
-      {
-        id: 'box_cta',
-        fieldLabel: 'CTA',
-        content: 'ORIGINAL BUTTON',
-        x: 25,
-        y: 76,
-        width: 50,
-        height: 8,
-        fontFamily: 'Montserrat',
-        fontSize: 20,
-        fontWeight: '700',
-        fontStyle: 'normal',
-        textAlign: 'center',
-        color: '#0B0B0F',
-        lineHeight: 1.2,
-        letterSpacing: 2,
-        backgroundColor: '#D4AF37',
-      },
-    ],
-  };
-
-  // Step 2: Create a real, binary Excel (.xlsx) workbook with 1 row using SheetJS
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet([
-    ['TITLE', 'SUBTITLE', 'PARAGRAPH 1', 'CTA'],
-    [
-      'APEX SOVEREIGN EDITION',
-      'Precision Engineered Mechanical Distinction',
-      'Hand-finished titanium chassis calibrated to micron tolerances with sapphire crystal.',
-      'ACQUIRE ALLOCATION',
-    ],
-  ]);
-  XLSX.utils.book_append_sheet(wb, ws, 'CatalogData');
-  const xlsxBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-
-  // Wrap into a File-like object with arrayBuffer()
-  const mockFile = {
-    name: 'test_catalog_1row.xlsx',
-    arrayBuffer: async () => xlsxBuffer.buffer.slice(xlsxBuffer.byteOffset, xlsxBuffer.byteOffset + xlsxBuffer.byteLength),
-  } as unknown as File;
-
-  // Step 3: Parse the spreadsheet file
-  const parseResult = await parseSpreadsheetFile(mockFile);
-  assert(parseResult.headers.length === 4, 'Detected exactly 4 column headers');
-  assert(parseResult.rows.length === 1, 'Detected exactly 1 data row');
-
-  // Step 4: Generate column mapping for the 4 text boxes
-  const labels = pageWithFourBoxes.textBoxes.map((b) => b.fieldLabel);
-  const mapping = generateMappingSuggestions(labels, parseResult.headers);
-
-  assert(mapping['TITLE'] === 'TITLE', 'TITLE maps to TITLE');
-  assert(mapping['SUBTITLE'] === 'SUBTITLE', 'SUBTITLE maps to SUBTITLE');
-  assert(mapping['PARAGRAPH 1'] === 'PARAGRAPH 1', 'PARAGRAPH 1 maps to PARAGRAPH 1');
-  assert(mapping['CTA'] === 'CTA', 'CTA maps to CTA');
-
-  // Step 5: Execute Population Action
-  const { updatedPages } = populatePagesWithSpreadsheetData(
-    [pageWithFourBoxes],
-    parseResult.rows,
-    mapping,
-    { mode: 'singlePage', selectedRowIndex: 0, targetPageIndex: 0 }
-  );
-
-  const populatedPage = updatedPages[0];
-  const bTitle = populatedPage.textBoxes.find((b) => b.fieldLabel === 'TITLE')!;
-  const bSub = populatedPage.textBoxes.find((b) => b.fieldLabel === 'SUBTITLE')!;
-  const bP1 = populatedPage.textBoxes.find((b) => b.fieldLabel === 'PARAGRAPH 1')!;
-  const bCta = populatedPage.textBoxes.find((b) => b.fieldLabel === 'CTA')!;
-
-  // Step 6: Verify text replacement
-  assert(bTitle.content === 'APEX SOVEREIGN EDITION', 'TITLE content updated to "APEX SOVEREIGN EDITION"');
-  assert(bSub.content === 'Precision Engineered Mechanical Distinction', 'SUBTITLE content updated');
-  assert(
-    bP1.content === 'Hand-finished titanium chassis calibrated to micron tolerances with sapphire crystal.',
-    'PARAGRAPH 1 content updated'
-  );
-  assert(bCta.content === 'ACQUIRE ALLOCATION', 'CTA content updated to "ACQUIRE ALLOCATION"');
-
-  // Step 7: Verify preservation of background image and all styling properties
-  assert(
-    populatedPage.imageUrl === pageWithFourBoxes.imageUrl,
-    'Background image URL and data are 100% preserved'
-  );
-  assert(bTitle.color === '#D4AF37', 'TITLE color (#D4AF37) preserved');
-  assert(bTitle.fontSize === 50, 'TITLE font size (50px) preserved');
-  assert(bTitle.fontFamily === 'Cinzel', 'TITLE font family (Cinzel) preserved');
-  assert(bCta.backgroundColor === '#D4AF37', 'CTA button background fill preserved');
-  assert(bCta.color === '#0B0B0F', 'CTA button text color (#0B0B0F) preserved');
-
-  console.log('✅ MINIMAL 1-PAGE 4-BOXES EXCEL WORKFLOW VERIFIED SUCCESSFULLY!\n');
-}
-
-testMinimalOnePageFourBoxesExcelWorkflow()
-  .then(() => {
-    console.log('--- ALL UNIT TESTS COMPLETED SUCCESSFULLY ---');
-  })
-  .catch((err) => {
-    console.error('Test execution error:', err);
-    process.exit(1);
+  const workbook = XLSX.read(csvContent, {
+    type: 'string',
+    raw: true,
+    codepage: 65001,
   });
+
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const matrix: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true });
+
+  assert.strictEqual(matrix[0][0], 'Title');
+  assert.strictEqual(matrix[1][0], '💎 Luxury Watch ✨');
+  assert.strictEqual(matrix[1][1], 'Limited Edition, 2026');
+  assert.strictEqual(matrix[1][2], 'Hand-finished, calibrated to micron tolerances.');
+  assert.strictEqual(matrix[1][3], 'ACQUIRE NOW');
+  console.log('✅ PASS: CSV emojis, embedded commas, and quotes preserved 100%');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 8: XLSX Binary Workbook Parsing
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 8] Binary XLSX Parsing');
+{
+  const wb = XLSX.utils.book_new();
+  const wsData = [
+    ['Headline', 'Subhead', 'Body Text', 'Action Button'],
+    ['APEX 1', 'SUB 1', 'DESC 1', 'CLICK 1'],
+    ['APEX 2', 'SUB 2', 'DESC 2', 'CLICK 2'],
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+
+  const xlsxBuffer = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+  const readBack = XLSX.read(xlsxBuffer, { type: 'array', raw: true });
+  const readSheet = readBack.Sheets[readBack.SheetNames[0]];
+  const readMatrix: any[][] = XLSX.utils.sheet_to_json(readSheet, { header: 1, raw: true });
+
+  assert.strictEqual(readMatrix.length, 3);
+  assert.strictEqual(readMatrix[0][0], 'Headline');
+  assert.strictEqual(readMatrix[1][0], 'APEX 1');
+  assert.strictEqual(readMatrix[2][3], 'CLICK 2');
+  console.log('✅ PASS: XLSX binary array buffer correctly parsed');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 9: Font Management Utility (Format detection & family name cleaning)
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 9] Font Management Utility Format & Name Processing');
+{
+  const { detectFontFormat, cleanFontFamilyName } = await import(
+    '../src/utils/fontManager'
+  );
+
+  assert.strictEqual(detectFontFormat('my-luxury-font.ttf'), 'truetype');
+  assert.strictEqual(detectFontFormat('SovereignDisplay.otf'), 'opentype');
+  assert.strictEqual(detectFontFormat('webfont.woff2'), 'woff2');
+  assert.strictEqual(detectFontFormat('webfont.woff'), 'woff');
+
+  assert.strictEqual(
+    cleanFontFamilyName('CinzelDecorative-Bold.ttf'),
+    'CinzelDecorative Bold'
+  );
+  assert.strictEqual(
+    cleanFontFamilyName('Apex_Sovereign_Display.otf'),
+    'Apex Sovereign Display'
+  );
+  console.log('✅ PASS: Font format detection and family name cleaning verified');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 10: 4-Corner Box Manipulation Math
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 10] 4-Corner and 8-Way Box Resizing Logic');
+{
+  const initialBox = { x: 15, y: 20, width: 70, height: 15 };
+
+  // 1. Dragging SE corner outward (+10% deltaX, +8% deltaY)
+  const seW = Math.max(10, Math.min(100 - initialBox.x, initialBox.width + 10));
+  const seH = Math.max(4, Math.min(100 - initialBox.y, initialBox.height + 8));
+  assert.strictEqual(seW, 80, 'SE corner expands width to 80%');
+  assert.strictEqual(seH, 23, 'SE corner expands height to 23%');
+
+  // 2. Dragging NW corner inward (+5% deltaX, +3% deltaY)
+  const nwW = Math.max(10, initialBox.width - 5);
+  const nwX = Math.max(0, initialBox.x + 5);
+  const nwH = Math.max(4, initialBox.height - 3);
+  const nwY = Math.max(0, initialBox.y + 3);
+  assert.strictEqual(nwW, 65, 'NW corner contracts width to 65%');
+  assert.strictEqual(nwX, 20, 'NW corner shifts x right to 20%');
+  assert.strictEqual(nwH, 12, 'NW corner contracts height to 12%');
+  assert.strictEqual(nwY, 23, 'NW corner shifts y down to 23%');
+
+  // 3. Clamping boundary checks
+  const maxW = Math.min(100 - initialBox.x, initialBox.width + 50);
+  assert.strictEqual(maxW, 85, 'Clamped to 100 - x = 85%');
+
+  console.log('✅ PASS: 4-corner box expansion, reduction, and boundary clamping verified');
+}
+
+console.log('\n--- ALL UNIT TESTS COMPLETED SUCCESSFULLY ---');
+

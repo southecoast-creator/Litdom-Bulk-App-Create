@@ -1,209 +1,557 @@
 /**
  * Litdom Batch Studio - IndexedDB Storage Engine
- * 100% Client-Side Persistent Storage for Projects, Images, and Fonts.
+ * High-reliability database storing lightweight projects in "projects" store
+ * and binary Blobs in "images" store (with ~220px thumbnails).
+ * Reuses a single connection, handles automatic reconnects, and migrates legacy formats.
  */
-import { Project, CustomFont } from '../types';
 
-const DB_NAME = 'litdom_batch_studio_db';
-const DB_VERSION = 1;
+import { Project, TextBoxTemplate, DesignPage, StoredImageRecord, StoredFontRecord } from '../types';
 
-interface DBSchema {
-  projects: Project;
-  customFonts: CustomFont;
-  templates: { id: string; name: string; pages: any[]; createdAt: number };
-}
+const DB_NAME = 'litdom_batch_studio_v2';
+const DB_VERSION = 2;
+const STORE_PROJECTS = 'projects';
+const STORE_IMAGES = 'images';
+const STORE_FONTS = 'fonts';
 
 let dbInstance: IDBDatabase | null = null;
+let dbConnectingPromise: Promise<IDBDatabase> | null = null;
 
-export async function getDB(): Promise<IDBDatabase> {
-  if (dbInstance) return dbInstance;
+// Global Object URL Registry for runtime memory hygiene
+const activeObjectUrls = new Set<string>();
 
-  return new Promise((resolve, reject) => {
+export function createManagedObjectUrl(blob: Blob): string {
+  const url = URL.createObjectURL(blob);
+  activeObjectUrls.add(url);
+  return url;
+}
+
+export function revokeManagedObjectUrl(url: string): void {
+  if (url && activeObjectUrls.has(url)) {
+    URL.revokeObjectURL(url);
+    activeObjectUrls.delete(url);
+  }
+}
+
+export function revokeAllManagedObjectUrls(): void {
+  for (const url of activeObjectUrls) {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      // safe fallback
+    }
+  }
+  activeObjectUrls.clear();
+}
+
+/**
+ * Persist storage request to avoid aggressive browser eviction
+ */
+export async function ensureStoragePersistence(): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.persist) {
+    try {
+      return await navigator.storage.persist();
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
+ * Open and reuse single IndexedDB connection
+ */
+export function getDB(): Promise<IDBDatabase> {
+  if (dbInstance) {
+    return Promise.resolve(dbInstance);
+  }
+  if (dbConnectingPromise) {
+    return dbConnectingPromise;
+  }
+
+  dbConnectingPromise = new Promise((resolve, reject) => {
+    ensureStoragePersistence();
+
     const request = indexedDB.open(DB_NAME, DB_VERSION);
 
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
-      if (!db.objectStoreNames.contains('projects')) {
-        db.createObjectStore('projects', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(STORE_PROJECTS)) {
+        db.createObjectStore(STORE_PROJECTS, { keyPath: 'id' });
       }
-      if (!db.objectStoreNames.contains('customFonts')) {
-        db.createObjectStore('customFonts', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(STORE_IMAGES)) {
+        db.createObjectStore(STORE_IMAGES, { keyPath: 'id' });
       }
-      if (!db.objectStoreNames.contains('templates')) {
-        db.createObjectStore('templates', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(STORE_FONTS)) {
+        db.createObjectStore(STORE_FONTS, { keyPath: 'id' });
       }
     };
 
-    request.onsuccess = () => {
-      dbInstance = request.result;
+    request.onsuccess = (event) => {
+      dbInstance = (event.target as IDBOpenDBRequest).result;
+      dbConnectingPromise = null;
+
+      dbInstance.onversionchange = () => {
+        dbInstance?.close();
+        dbInstance = null;
+      };
+
+      dbInstance.onclose = () => {
+        dbInstance = null;
+      };
+
       resolve(dbInstance);
     };
 
     request.onerror = () => {
-      reject(new Error(`Failed to open IndexedDB: ${request.error?.message}`));
+      dbConnectingPromise = null;
+      reject(new Error('Unable to access local browser database. Please check browser permissions.'));
     };
   });
+
+  return dbConnectingPromise;
 }
 
-export async function saveProject(project: Project): Promise<void> {
-  const db = await getDB();
-  return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction('projects', 'readwrite');
-      const store = tx.objectStore('projects');
-      const req = store.put({ ...project, updatedAt: Date.now() });
-
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    } catch (err) {
-      reject(err);
-    }
-  });
+export function createDefaultTemplate(): TextBoxTemplate[] {
+  return [
+    {
+      id: 'template_title',
+      fieldLabel: 'Title',
+      x: 10,
+      y: 20,
+      width: 80,
+      height: 12,
+      fontFamily: 'Cinzel',
+      fontSize: 48,
+      fontWeight: '700',
+      fontStyle: 'normal',
+      textAlign: 'center',
+      color: '#D4AF37',
+      lineHeight: 1.25,
+      letterSpacing: 2,
+    },
+    {
+      id: 'template_subtitle',
+      fieldLabel: 'Subtitle',
+      x: 15,
+      y: 36,
+      width: 70,
+      height: 8,
+      fontFamily: 'Plus Jakarta Sans',
+      fontSize: 24,
+      fontWeight: '500',
+      fontStyle: 'normal',
+      textAlign: 'center',
+      color: '#FFF8E7',
+      lineHeight: 1.35,
+      letterSpacing: 0,
+    },
+    {
+      id: 'template_paragraph1',
+      fieldLabel: 'Paragraph 1',
+      x: 15,
+      y: 48,
+      width: 70,
+      height: 16,
+      fontFamily: 'Plus Jakarta Sans',
+      fontSize: 20,
+      fontWeight: '400',
+      fontStyle: 'normal',
+      textAlign: 'center',
+      color: '#F4D58D',
+      lineHeight: 1.5,
+      letterSpacing: 0,
+    },
+    {
+      id: 'template_cta',
+      fieldLabel: 'CTA',
+      x: 25,
+      y: 72,
+      width: 50,
+      height: 8,
+      fontFamily: 'Montserrat',
+      fontSize: 18,
+      fontWeight: '700',
+      fontStyle: 'normal',
+      textAlign: 'center',
+      color: '#D4AF37',
+      lineHeight: 1.2,
+      letterSpacing: 2,
+    },
+  ];
 }
 
-export async function getProject(id: string): Promise<Project | undefined> {
-  const db = await getDB();
-  return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction('projects', 'readonly');
-      const store = tx.objectStore('projects');
-      const req = store.get(id);
+/**
+ * Generate a ~220px JPEG thumbnail Blob from an Image/Blob
+ */
+export async function createThumbnailBlob(
+  source: Blob | HTMLImageElement,
+  maxDimension = 240
+): Promise<Blob> {
+  let img: HTMLImageElement;
+  let shouldRevoke = false;
 
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
+  if (source instanceof Blob) {
+    img = new Image();
+    const url = URL.createObjectURL(source);
+    shouldRevoke = true;
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('Failed to load image for thumbnail'));
+      img.src = url;
+    });
+    URL.revokeObjectURL(url);
+  } else {
+    img = source;
+  }
 
-export async function getAllProjects(): Promise<Project[]> {
-  const db = await getDB();
-  return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction('projects', 'readonly');
-      const store = tx.objectStore('projects');
-      const req = store.getAll();
+  const canvas = document.createElement('canvas');
+  const srcW = img.naturalWidth || img.width || 1000;
+  const srcH = img.naturalHeight || img.height || 1000;
 
-      req.onsuccess = () => {
-        const sorted = (req.result || []).sort(
-          (a: Project, b: Project) => b.updatedAt - a.updatedAt
-        );
-        resolve(sorted);
-      };
-      req.onerror = () => reject(req.error);
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
+  const ratio = srcW / srcH;
+  let dstW = maxDimension;
+  let dstH = Math.round(maxDimension / ratio);
 
-export async function deleteProject(id: string): Promise<void> {
-  const db = await getDB();
-  return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction('projects', 'readwrite');
-      const store = tx.objectStore('projects');
-      const req = store.delete(id);
+  if (srcH > srcW) {
+    dstH = maxDimension;
+    dstW = Math.round(maxDimension * ratio);
+  }
 
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
+  canvas.width = Math.max(1, dstW);
+  canvas.height = Math.max(1, dstH);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Cannot get canvas 2d context for thumbnail');
 
-export async function clearAllProjects(): Promise<void> {
-  const db = await getDB();
-  return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction('projects', 'readwrite');
-      const store = tx.objectStore('projects');
-      const req = store.clear();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'medium';
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
-
-export async function saveCustomFont(font: CustomFont): Promise<void> {
-  const db = await getDB();
-  return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction('customFonts', 'readwrite');
-      const store = tx.objectStore('customFonts');
-      const req = store.put(font);
-
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
-
-export async function getAllCustomFonts(): Promise<CustomFont[]> {
-  const db = await getDB();
-  return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction('customFonts', 'readonly');
-      const store = tx.objectStore('customFonts');
-      const req = store.getAll();
-
-      req.onsuccess = () => resolve(req.result || []);
-      req.onerror = () => reject(req.error);
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
-
-export async function deleteCustomFont(id: string): Promise<void> {
-  const db = await getDB();
-  return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction('customFonts', 'readwrite');
-      const store = tx.objectStore('customFonts');
-      const req = store.delete(id);
-
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    } catch (err) {
-      reject(err);
-    }
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (b) => {
+        if (b) resolve(b);
+        else reject(new Error('Thumbnail generation failed'));
+      },
+      'image/jpeg',
+      0.82
+    );
   });
 }
 
 /**
- * Check browser storage estimate and remaining quota
+ * Save an uploaded design image into the "images" store as Blobs (original + ~220px thumbnail)
  */
-export async function getStorageEstimate(): Promise<{
-  usedBytes: number;
-  quotaBytes: number;
-  percentage: number;
-  isSupported: boolean;
-}> {
-  if (navigator.storage && navigator.storage.estimate) {
-    try {
-      const estimate = await navigator.storage.estimate();
-      const usedBytes = estimate.usage || 0;
-      const quotaBytes = estimate.quota || 1;
-      const percentage = Math.min(100, Math.round((usedBytes / quotaBytes) * 100));
-      return { usedBytes, quotaBytes, percentage, isSupported: true };
-    } catch {
-      // Fallback
+export async function storeImageFile(
+  fileOrBlob: File | Blob
+): Promise<{ imageId: string; width: number; height: number; thumbnailBlob: Blob }> {
+  const db = await getDB();
+  const imageId = `img_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+  // Determine width and height
+  const img = new Image();
+  const tempUrl = URL.createObjectURL(fileOrBlob);
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error('Could not read image file'));
+    img.src = tempUrl;
+  });
+  URL.revokeObjectURL(tempUrl);
+
+  const width = img.naturalWidth || 1000;
+  const height = img.naturalHeight || 1000;
+  const thumbnailBlob = await createThumbnailBlob(img, 240);
+
+  const record: StoredImageRecord = {
+    id: imageId,
+    originalBlob: fileOrBlob,
+    thumbnailBlob,
+    mimeType: fileOrBlob.type || 'image/png',
+    width,
+    height,
+    createdAt: Date.now(),
+  };
+
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_IMAGES, 'readwrite');
+    const store = tx.objectStore(STORE_IMAGES);
+    const req = store.put(record);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(new Error('Could not save design background image to storage.'));
+  });
+
+  return { imageId, width, height, thumbnailBlob };
+}
+
+export async function getImageRecord(imageId: string): Promise<StoredImageRecord | null> {
+  const db = await getDB();
+  return new Promise<StoredImageRecord | null>((resolve, reject) => {
+    const tx = db.transaction(STORE_IMAGES, 'readonly');
+    const store = tx.objectStore(STORE_IMAGES);
+    const req = store.get(imageId);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(new Error('Could not retrieve image from storage.'));
+  });
+}
+
+export async function getThumbnailBlob(imageId: string): Promise<Blob | null> {
+  const record = await getImageRecord(imageId);
+  return record ? record.thumbnailBlob : null;
+}
+
+export async function getOriginalImageBlob(imageId: string): Promise<Blob | null> {
+  const record = await getImageRecord(imageId);
+  return record ? record.originalBlob : null;
+}
+
+export async function deleteImages(imageIds: string[]): Promise<void> {
+  if (!imageIds.length) return;
+  const db = await getDB();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_IMAGES, 'readwrite');
+    const store = tx.objectStore(STORE_IMAGES);
+    for (const id of imageIds) {
+      store.delete(id);
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(new Error('Failed to clean up unused image assets.'));
+  });
+}
+
+/**
+ * Migration helper: converts base64 data URLs to Blobs and saves to "images" store
+ */
+async function base64ToBlob(base64DataUrl: string): Promise<Blob> {
+  const res = await fetch(base64DataUrl);
+  return await res.blob();
+}
+
+/**
+ * Migrate legacy projects into the new shared-template format
+ */
+export async function migrateLegacyProject(rawProject: any): Promise<Project> {
+  // If already migrated, return
+  if (rawProject.template && Array.isArray(rawProject.template) && rawProject.pages) {
+    const isClean = rawProject.pages.every((p: any) => p.imageId && p.values);
+    if (isClean) {
+      return rawProject as Project;
     }
   }
-  return { usedBytes: 0, quotaBytes: 0, percentage: 0, isSupported: false };
+
+  const legacyPages: any[] = rawProject.pages || [];
+  let template: TextBoxTemplate[] = [];
+
+  // Extract shared template from the first page that has textBoxes
+  for (const page of legacyPages) {
+    if (page.textBoxes && Array.isArray(page.textBoxes) && page.textBoxes.length > 0) {
+      const pageW = page.originalWidth || page.width || 1000;
+      template = page.textBoxes.map((b: any, idx: number) => {
+        // scale font size to 1000px baseline
+        const scaleTo1000 = 1000 / pageW;
+        const baselineFontSize = Math.round((b.fontSize || 36) * scaleTo1000);
+        return {
+          id: b.id || `tpl_box_${idx}`,
+          fieldLabel: b.fieldLabel || `Field ${idx + 1}`,
+          x: typeof b.x === 'number' ? b.x : 10,
+          y: typeof b.y === 'number' ? b.y : 10 + idx * 15,
+          width: typeof b.width === 'number' ? b.width : 80,
+          height: typeof b.height === 'number' ? b.height : 12,
+          fontFamily: b.fontFamily || 'Plus Jakarta Sans',
+          fontSize: baselineFontSize,
+          fontWeight: b.fontWeight || '600',
+          fontStyle: b.fontStyle || 'normal',
+          textAlign: b.textAlign || 'center',
+          color: b.color || '#FFF8E7',
+          lineHeight: b.lineHeight || 1.3,
+          letterSpacing: b.letterSpacing || 0,
+          shadow: b.shadow,
+          stroke: b.stroke,
+          fill: b.fill,
+        };
+      });
+      break;
+    }
+  }
+
+  if (template.length === 0) {
+    template = createDefaultTemplate();
+  }
+
+  // Migrate pages and extract images into Blobs
+  const newPages: DesignPage[] = [];
+
+  for (let i = 0; i < legacyPages.length; i++) {
+    const lp = legacyPages[i];
+    let imageId = lp.imageId;
+
+    if (!imageId) {
+      const base64Src = lp.originalUrl || lp.dataUrl || lp.backgroundImage;
+      if (base64Src && typeof base64Src === 'string' && base64Src.startsWith('data:')) {
+        try {
+          const blob = await base64ToBlob(base64Src);
+          const stored = await storeImageFile(blob);
+          imageId = stored.imageId;
+        } catch {
+          imageId = `missing_${i}`;
+        }
+      } else {
+        imageId = `img_legacy_${Date.now()}_${i}`;
+      }
+    }
+
+    // Populate values from legacy textBoxes
+    const values: Record<string, string> = { ...(lp.values || {}) };
+    if (lp.textBoxes && Array.isArray(lp.textBoxes)) {
+      for (const box of lp.textBoxes) {
+        if (box.fieldLabel && values[box.fieldLabel] === undefined) {
+          values[box.fieldLabel] = box.content || '';
+        }
+      }
+    }
+
+    newPages.push({
+      id: lp.id || `page_${Date.now()}_${i}`,
+      imageId,
+      name: lp.name || `Design ${i + 1}`,
+      width: lp.originalWidth || lp.width || 1000,
+      height: lp.originalHeight || lp.height || 1000,
+      values,
+    });
+  }
+
+  const migrated: Project = {
+    id: rawProject.id || `proj_${Date.now()}`,
+    name: rawProject.name || 'Untitled Project',
+    createdAt: rawProject.createdAt || Date.now(),
+    updatedAt: Date.now(),
+    template,
+    pages: newPages,
+    lastSpreadsheet: rawProject.lastSpreadsheet,
+    customFonts: rawProject.customFonts || [],
+  };
+
+  // Re-save the migrated project to IndexedDB
+  await saveProject(migrated);
+  return migrated;
 }
 
 /**
- * Format bytes to readable string (e.g. 14.2 MB)
+ * Save project to IndexedDB
  */
+export async function saveProject(project: Project): Promise<void> {
+  const db = await getDB();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_PROJECTS, 'readwrite');
+    const store = tx.objectStore(STORE_PROJECTS);
+    const req = store.put({
+      ...project,
+      updatedAt: Date.now(),
+    });
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(new Error('Could not save project to browser storage.'));
+  });
+}
+
+/**
+ * Get project by ID, with automatic legacy migration
+ */
+export async function getProject(id: string): Promise<Project | null> {
+  const db = await getDB();
+  return new Promise<Project | null>((resolve, reject) => {
+    const tx = db.transaction(STORE_PROJECTS, 'readonly');
+    const store = tx.objectStore(STORE_PROJECTS);
+    const req = store.get(id);
+    req.onsuccess = async () => {
+      const raw = req.result;
+      if (!raw) {
+        resolve(null);
+        return;
+      }
+      try {
+        const migrated = await migrateLegacyProject(raw);
+        resolve(migrated);
+      } catch (err) {
+        console.error('Migration error, returning raw:', err);
+        resolve(raw as Project);
+      }
+    };
+    req.onerror = () => reject(new Error('Could not load the requested project.'));
+  });
+}
+
+/**
+ * List all projects (sorted newest first)
+ */
+export async function getAllProjects(): Promise<Project[]> {
+  const db = await getDB();
+  return new Promise<Project[]>((resolve, reject) => {
+    const tx = db.transaction(STORE_PROJECTS, 'readonly');
+    const store = tx.objectStore(STORE_PROJECTS);
+    const req = store.getAll();
+    req.onsuccess = () => {
+      const results: Project[] = (req.result || []).map((p: any) => ({
+        id: p.id,
+        name: p.name || 'Untitled Project',
+        createdAt: p.createdAt || Date.now(),
+        updatedAt: p.updatedAt || Date.now(),
+        template: p.template || createDefaultTemplate(),
+        pages: p.pages || [],
+        lastSpreadsheet: p.lastSpreadsheet,
+        customFonts: p.customFonts || [],
+      }));
+      results.sort((a, b) => b.updatedAt - a.updatedAt);
+      resolve(results);
+    };
+    req.onerror = () => reject(new Error('Could not load project library.'));
+  });
+}
+
+/**
+ * Delete a project and its associated image Blobs
+ */
+export async function deleteProject(id: string): Promise<void> {
+  const project = await getProject(id);
+  const imageIdsToDelete: string[] = [];
+  if (project?.pages) {
+    for (const p of project.pages) {
+      if (p.imageId) imageIdsToDelete.push(p.imageId);
+    }
+  }
+
+  const db = await getDB();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_PROJECTS, 'readwrite');
+    const store = tx.objectStore(STORE_PROJECTS);
+    const req = store.delete(id);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(new Error('Could not delete project.'));
+  });
+
+  if (imageIdsToDelete.length > 0) {
+    await deleteImages(imageIdsToDelete);
+  }
+}
+
+/**
+ * Get storage estimate
+ */
+export async function getStorageEstimate(): Promise<{ usedBytes: number; quotaBytes: number; percentage: number }> {
+  if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.estimate) {
+    try {
+      const estimate = await navigator.storage.estimate();
+      const used = estimate.usage || 0;
+      const quota = estimate.quota || 1;
+      return {
+        usedBytes: used,
+        quotaBytes: quota,
+        percentage: Math.min(100, Math.round((used / quota) * 100)),
+      };
+    } catch {
+      return { usedBytes: 0, quotaBytes: 0, percentage: 0 };
+    }
+  }
+  return { usedBytes: 0, quotaBytes: 0, percentage: 0 };
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
   const k = 1024;
@@ -213,42 +561,49 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
- * Export project to a downloadable JSON backup file
+ * Font Store Operations
  */
-export function exportProjectBackup(project: Project) {
-  const jsonStr = JSON.stringify(project, null, 2);
-  const blob = new Blob([jsonStr], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  const sanitizedName = (project.name || 'litdom-project')
-    .toLowerCase()
-    .replace(/[^a-z0-9]/gi, '_');
-  a.href = url;
-  a.download = `${sanitizedName}-backup-${new Date().toISOString().slice(0, 10)}.litdom.json`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+export async function saveFontRecord(record: StoredFontRecord): Promise<void> {
+  const db = await getDB();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_FONTS, 'readwrite');
+    const store = tx.objectStore(STORE_FONTS);
+    const req = store.put(record);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(new Error('Failed to save custom font into database.'));
+  });
 }
 
-/**
- * Read imported project backup file
- */
-export async function importProjectBackup(file: File): Promise<Project> {
-  const text = await file.text();
-  const parsed = JSON.parse(text);
-  if (!parsed || !parsed.name || !Array.isArray(parsed.pages)) {
-    throw new Error('Invalid Litdom Studio project backup file format.');
-  }
-
-  // Create clean ID to avoid collision or allow restoring
-  const restoredProject: Project = {
-    ...parsed,
-    id: `proj_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-    name: `${parsed.name} (Restored)`,
-    updatedAt: Date.now(),
-  };
-
-  await saveProject(restoredProject);
-  return restoredProject;
+export async function getAllFontRecords(): Promise<StoredFontRecord[]> {
+  const db = await getDB();
+  return new Promise<StoredFontRecord[]>((resolve, reject) => {
+    const tx = db.transaction(STORE_FONTS, 'readonly');
+    const store = tx.objectStore(STORE_FONTS);
+    const req = store.getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(new Error('Failed to retrieve custom fonts.'));
+  });
 }
+
+export async function getFontRecord(id: string): Promise<StoredFontRecord | null> {
+  const db = await getDB();
+  return new Promise<StoredFontRecord | null>((resolve, reject) => {
+    const tx = db.transaction(STORE_FONTS, 'readonly');
+    const store = tx.objectStore(STORE_FONTS);
+    const req = store.get(id);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(new Error('Failed to retrieve custom font.'));
+  });
+}
+
+export async function deleteFontRecord(id: string): Promise<void> {
+  const db = await getDB();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_FONTS, 'readwrite');
+    const store = tx.objectStore(STORE_FONTS);
+    const req = store.delete(id);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(new Error('Failed to delete custom font.'));
+  });
+}
+
