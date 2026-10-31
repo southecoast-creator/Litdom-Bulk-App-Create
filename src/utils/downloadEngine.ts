@@ -77,7 +77,7 @@ export async function exportSingleDesign(
   const boxesToRender =
     page.textBoxes && page.textBoxes.length > 0 ? page.textBoxes : project.template;
 
-  await preloadTemplateFonts(boxesToRender);
+  await preloadTemplateFonts(boxesToRender, page.richValues);
 
   const imageBlob = await getOriginalImageBlob(page.imageId);
   if (!imageBlob) throw new Error(`Could not load background image for ${page.name}`);

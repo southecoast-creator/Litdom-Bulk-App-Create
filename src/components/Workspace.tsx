@@ -35,6 +35,7 @@ import {
   Square,
   Edit3,
   AlertTriangle,
+  Grid,
 } from 'lucide-react';
 import {
   Project,
@@ -153,6 +154,9 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     boxY: number;
     boxW: number;
   } | null>(null);
+
+  // Snap-to-Grid mode for precise alignment
+  const [isSnapToGrid, setIsSnapToGrid] = useState(false);
 
   const selectedBox: TextBoxTemplate | undefined =
     activeBoxes.find((b) => b.id === selectedBoxId) || activeBoxes[0];
@@ -800,6 +804,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     box: TextBoxTemplate,
     e: React.PointerEvent<HTMLCanvasElement>
   ) => {
+    recordHistory(project);
     setSelectedBoxId(box.id);
     setActiveHandle(handle);
     setDragStart({
@@ -942,12 +947,35 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         break;
     }
 
+    if (isSnapToGrid) {
+      // Snap to 2.5% increments
+      newX = Math.round(newX / 2.5) * 2.5;
+      newY = Math.round(newY / 2.5) * 2.5;
+      newW = Math.max(10, Math.round(newW / 2.5) * 2.5);
+
+      // Snap to center (horizontal center: newX + newW / 2 close to 50%)
+      const centerX = newX + newW / 2;
+      if (Math.abs(centerX - 50) < 2) {
+        newX = Math.max(0, Math.round((50 - newW / 2) * 10) / 10);
+      }
+    }
+
     // Update geometry on active design
     handleUpdateCurrentDesignBoxGeometry(selectedBoxId, { x: newX, y: newY, width: newW });
   };
 
   const handleCanvasPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (activeHandle) {
+      if (
+        activeHandle === 'move' &&
+        dragStart &&
+        Math.abs(e.clientX - dragStart.mouseX) < 5 &&
+        Math.abs(e.clientY - dragStart.mouseY) < 5 &&
+        selectedBoxId
+      ) {
+        // Tapped on the text box without dragging -> Open in-place text editor!
+        setEditingRichBoxId(selectedBoxId);
+      }
       setActiveHandle(null);
       setDragStart(null);
       try {
@@ -962,18 +990,28 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     const targetBox = activeBoxes.find((b) => b.id === editingRichBoxId);
     if (!targetBox) return null;
 
-    const rect = canvasRef.current.getBoundingClientRect();
-    const ctx = canvasRef.current.getContext('2d');
+    const canvasEl = canvasRef.current;
+    const containerEl = canvasContainerRef.current;
+    if (!containerEl) return null;
+
+    const canvasRect = canvasEl.getBoundingClientRect();
+    const containerRect = containerEl.getBoundingClientRect();
+    const ctx = canvasEl.getContext('2d');
     if (!ctx) return null;
 
-    const layout = computeTextBoxLayout(ctx, targetBox, activePage, rect.width, rect.height);
+    const layout = computeTextBoxLayout(ctx, targetBox, activePage, canvasRect.width, canvasRect.height);
+    const canvasLeft = canvasRect.left - containerRect.left;
+    const canvasTop = canvasRect.top - containerRect.top;
+
     return {
       box: targetBox,
-      scale: rect.width / 1000,
-      boxX: layout.boxX,
-      boxY: layout.boxY,
+      scale: canvasRect.width / 1000,
+      boxX: canvasLeft + layout.boxX,
+      boxY: canvasTop + layout.boxY,
       boxW: layout.boxW,
       boxH: layout.computedHeightPx,
+      containerWidth: containerRect.width,
+      containerHeight: containerRect.height,
     };
   };
 
@@ -1024,23 +1062,38 @@ export const Workspace: React.FC<WorkspaceProps> = ({
           </div>
         </div>
 
-        {/* Center: In-Memory Undo / Redo */}
-        <div className="flex items-center gap-1 bg-[#17171C] border border-[#2D2D38] p-1 rounded-xl">
+        {/* Center: In-Memory Undo / Redo & Snap-to-Grid */}
+        <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1 bg-[#17171C] border border-[#2D2D38] p-1 rounded-xl">
+            <button
+              onClick={handleUndo}
+              disabled={undoStack.length === 0}
+              className="p-1.5 rounded-lg text-[#FFF8E7]/70 hover:text-white hover:bg-[#262632] disabled:opacity-30 transition-all min-h-[36px] min-w-[36px] flex items-center justify-center"
+              title="Undo (Ctrl+Z)"
+            >
+              <Undo2 className="w-4 h-4" />
+            </button>
+            <button
+              onClick={handleRedo}
+              disabled={redoStack.length === 0}
+              className="p-1.5 rounded-lg text-[#FFF8E7]/70 hover:text-white hover:bg-[#262632] disabled:opacity-30 transition-all min-h-[36px] min-w-[36px] flex items-center justify-center"
+              title="Redo (Ctrl+Y)"
+            >
+              <Redo2 className="w-4 h-4" />
+            </button>
+          </div>
+
           <button
-            onClick={handleUndo}
-            disabled={undoStack.length === 0}
-            className="p-1.5 rounded-lg text-[#FFF8E7]/70 hover:text-white hover:bg-[#262632] disabled:opacity-30 transition-all min-h-[36px] min-w-[36px] flex items-center justify-center"
-            title="Undo (Ctrl+Z)"
+            onClick={() => setIsSnapToGrid(!isSnapToGrid)}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-xs font-medium transition-all min-h-[36px] ${
+              isSnapToGrid
+                ? 'bg-[#D4AF37]/20 border-[#D4AF37] text-[#D4AF37] font-semibold'
+                : 'bg-[#17171C] border-[#2D2D38] text-[#FFF8E7]/60 hover:text-white hover:bg-[#262632]'
+            }`}
+            title="Snap to Grid (2.5% increment alignment)"
           >
-            <Undo2 className="w-4 h-4" />
-          </button>
-          <button
-            onClick={handleRedo}
-            disabled={redoStack.length === 0}
-            className="p-1.5 rounded-lg text-[#FFF8E7]/70 hover:text-white hover:bg-[#262632] disabled:opacity-30 transition-all min-h-[36px] min-w-[36px] flex items-center justify-center"
-            title="Redo (Ctrl+Y)"
-          >
-            <Redo2 className="w-4 h-4" />
+            <Grid className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Snap</span>
           </button>
         </div>
 
@@ -1055,7 +1108,12 @@ export const Workspace: React.FC<WorkspaceProps> = ({
           </button>
 
           <button
-            onClick={() => setIsDownloadOpen(true)}
+            onClick={() => {
+              if (editingRichBoxId) {
+                setEditingRichBoxId(null);
+              }
+              setIsDownloadOpen(true);
+            }}
             className="bg-gradient-to-r from-[#D4AF37] to-[#F4D58D] text-[#0B0B0F] text-xs font-bold px-3.5 py-2 rounded-xl flex items-center gap-1.5 shadow-md shadow-[#D4AF37]/20 transition-all min-h-[44px]"
           >
             <Download className="w-4 h-4" />
@@ -1145,7 +1203,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                   onPointerDown={handleCanvasPointerDown}
                   onPointerMove={handleCanvasPointerMove}
                   onPointerUp={handleCanvasPointerUp}
-                  style={{ touchAction: 'none' }}
+                  style={{ touchAction: activeHandle ? 'none' : 'pan-y pinch-zoom' }}
                   className="cursor-move max-w-full h-auto rounded-xl shadow-lg"
                 />
 
@@ -1159,6 +1217,8 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                     boxY={editingLayout.boxY}
                     boxW={editingLayout.boxW}
                     boxH={editingLayout.boxH}
+                    containerWidth={editingLayout.containerWidth}
+                    containerHeight={editingLayout.containerHeight}
                     onSave={handleSaveRichText}
                     onStyleWordInAllDesigns={handleStyleWordInAllDesigns}
                     onClose={() => setEditingRichBoxId(null)}
@@ -1470,33 +1530,61 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                 ))}
               </div>
 
-              {/* 4. Color & Swatches */}
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] text-[#FFF8E7]/70">Color</span>
-                <div className="flex items-center gap-1.5">
-                  {['#D4AF37', '#FFF8E7', '#F4D58D', '#0B0B0F', '#FFFFFF', '#EF4444'].map(
-                    (hex) => (
-                      <button
-                        key={hex}
-                        onClick={() =>
-                          handleUpdateTemplateBox(selectedBox.id, { color: hex })
+              {/* 4. Color & Swatches + Hex Code Input */}
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] text-[#FFF8E7]/70">Color</span>
+                  {/* Hex input */}
+                  <div className="flex items-center gap-1 bg-[#17171C] border border-[#2D2D38] px-2 py-0.5 rounded-lg">
+                    <span className="text-[11px] text-[#D4AF37] font-mono">#</span>
+                    <input
+                      type="text"
+                      maxLength={7}
+                      value={selectedBox.color.replace(/^#/, '')}
+                      onChange={(e) => {
+                        const val = e.target.value.trim();
+                        if (/^[0-9A-Fa-f]{0,6}$/.test(val)) {
+                          handleUpdateTemplateBox(selectedBox.id, { color: '#' + val });
                         }
-                        className={`w-6 h-6 rounded-full border transition-all ${
-                          selectedBox.color === hex
-                            ? 'border-white scale-110 shadow-md'
-                            : 'border-transparent hover:scale-105'
-                        }`}
-                        style={{ backgroundColor: hex }}
-                      />
-                    )
-                  )}
+                      }}
+                      className="w-16 bg-transparent text-xs font-mono text-[#FFF8E7] focus:outline-none uppercase"
+                      placeholder="FFFFFF"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-1.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {['#D4AF37', '#FFF8E7', '#F4D58D', '#0B0B0F', '#FFFFFF', '#EF4444', '#3B82F6', '#10B981'].map(
+                      (hex) => (
+                        <button
+                          key={hex}
+                          onClick={() =>
+                            handleUpdateTemplateBox(selectedBox.id, { color: hex })
+                          }
+                          className={`w-6 h-6 rounded-full border transition-all ${
+                            selectedBox.color.toUpperCase() === hex.toUpperCase()
+                              ? 'border-white scale-110 shadow-md ring-2 ring-[#D4AF37]'
+                              : 'border-white/20 hover:scale-105'
+                          }`}
+                          style={{ backgroundColor: hex }}
+                          title={hex}
+                        />
+                      )
+                    )}
+                  </div>
                   <input
                     type="color"
-                    value={selectedBox.color}
+                    value={
+                      selectedBox.color.startsWith('#') && selectedBox.color.length === 7
+                        ? selectedBox.color
+                        : '#D4AF37'
+                    }
                     onChange={(e) =>
                       handleUpdateTemplateBox(selectedBox.id, { color: e.target.value })
                     }
-                    className="w-7 h-7 rounded-full bg-transparent border-0 cursor-pointer"
+                    className="w-7 h-7 rounded-full bg-transparent border-0 cursor-pointer shrink-0"
+                    title="Choose custom color"
                   />
                 </div>
               </div>

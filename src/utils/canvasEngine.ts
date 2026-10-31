@@ -197,7 +197,7 @@ function tokenizeRuns(
     const fontSize = Math.max(6, Math.round(baseFontSize * scale));
 
     const isBold = run.bold !== undefined ? run.bold : (box.fontWeight === '700' || box.fontWeight === '800');
-    const fontWeight = isBold ? '700' : (box.fontWeight || '400');
+    const fontWeight = isBold ? '800' : '400';
 
     const isItalic = run.italic !== undefined ? run.italic : box.fontStyle === 'italic';
     const fontStyle = isItalic ? 'italic' : 'normal';
@@ -354,7 +354,27 @@ export function computeTextBoxLayout(
     totalLinesHeight += line.height;
   }
 
-  const computedHeightPx = Math.max(16 * scale, totalLinesHeight + scaledPadding * 2);
+  // Reserve extra vertical space for effects that flow outside line bounds (drips, melting, shadows, glow)
+  let extraEffectPaddingBottom = 0;
+  for (const line of lines) {
+    for (const token of line.tokens) {
+      const ef = token.effects;
+      if (ef?.dripping?.enabled) {
+        extraEffectPaddingBottom = Math.max(extraEffectPaddingBottom, ((ef.dripping.intensity ?? 50) / 100) * 18 * scale);
+      }
+      if (ef?.melting?.enabled) {
+        extraEffectPaddingBottom = Math.max(extraEffectPaddingBottom, ((ef.melting.intensity ?? 50) / 100) * 16 * scale);
+      }
+      if (ef?.shadow?.enabled && (ef.shadow.offsetY || 0) > 0) {
+        extraEffectPaddingBottom = Math.max(extraEffectPaddingBottom, ((ef.shadow.offsetY || 0) + (ef.shadow.blur || 0)) * scale);
+      }
+      if (ef?.glow?.enabled) {
+        extraEffectPaddingBottom = Math.max(extraEffectPaddingBottom, (ef.glow.strength || 0) * 0.4 * scale);
+      }
+    }
+  }
+
+  const computedHeightPx = Math.max(16 * scale, totalLinesHeight + scaledPadding * 2 + extraEffectPaddingBottom);
   const computedHeightPercent = (computedHeightPx / targetH) * 100;
 
   return {
@@ -366,6 +386,445 @@ export function computeTextBoxLayout(
     boxW,
     scaledPadding,
   };
+}
+
+function hashString(str: string): number {
+  let hash = 5381;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) + hash) + str.charCodeAt(i);
+  }
+  return Math.abs(hash);
+}
+
+function getSeededRandom(seed: number) {
+  let s = (seed % 2147483647) || 1;
+  return () => {
+    s = (s * 16807) % 2147483647;
+    return (s - 1) / 2147483646;
+  };
+}
+
+/**
+ * Draw a styled word token with all standard, texture, artistic, and liquid effects.
+ * Strictly respects draw order and proportional typography scaling from 1000px baseline.
+ */
+function drawStyledTokenWithEffects(
+  ctx: CanvasRenderingContext2D,
+  token: LayoutToken,
+  tokenX: number,
+  baselineY: number,
+  scale: number,
+  box: TextBoxTemplate
+) {
+  const effects = token.effects || {};
+  const rand = getSeededRandom(hashString(token.text + token.fontSize));
+
+  ctx.save();
+  ctx.font = `${token.fontStyle} ${token.fontWeight} ${token.fontSize}px "${token.fontFamily}", sans-serif`;
+  if (token.letterSpacing && typeof (ctx as any).letterSpacing !== 'undefined') {
+    (ctx as any).letterSpacing = `${token.letterSpacing}px`;
+  }
+
+  // 1. BACKGROUND HIGHLIGHT / PILL
+  if (effects.highlight?.enabled) {
+    ctx.save();
+    ctx.fillStyle = effects.highlight.color || '#FACC15';
+    ctx.globalAlpha = (effects.highlight.opacity ?? 60) / 100;
+    const padX = 4 * scale;
+    const hY = baselineY - token.fontSize * 0.88;
+    const hH = token.fontSize * 1.15;
+    ctx.fillRect(tokenX - padX, hY, token.width + padX * 2, hH);
+    ctx.restore();
+  }
+
+  if (effects.pill?.enabled) {
+    ctx.save();
+    ctx.fillStyle = effects.pill.color || '#1A1A22';
+    ctx.globalAlpha = (effects.pill.opacity ?? 90) / 100;
+    const padX = 6 * scale;
+    const padY = 3 * scale;
+    const radius = Math.min(12 * scale, (effects.pill.spread ?? 50) * 0.2 * scale);
+    const pX = tokenX - padX;
+    const pY = baselineY - token.fontSize * 0.85 - padY;
+    const pW = token.width + padX * 2;
+    const pH = token.fontSize * 1.1 + padY * 2;
+    ctx.beginPath();
+    if (typeof (ctx as any).roundRect === 'function') {
+      (ctx as any).roundRect(pX, pY, pW, pH, radius);
+    } else {
+      ctx.rect(pX, pY, pW, pH);
+    }
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 2. SHADOWS, EXTRUDE, ECHO, GLITCH, CHROMATIC, DOUBLE EXPOSURE
+  if (effects.extrude?.enabled) {
+    ctx.save();
+    const depth = ((effects.extrude.intensity ?? 50) / 100) * 10 * scale + 2 * scale;
+    const angleRad = ((effects.extrude.angle ?? 45) * Math.PI) / 180;
+    const steps = 6;
+    ctx.fillStyle = effects.extrude.color || '#000000';
+    ctx.globalAlpha = (effects.extrude.opacity ?? 90) / 100;
+    for (let i = 1; i <= steps; i++) {
+      const t = (i / steps) * depth;
+      ctx.fillText(token.text, tokenX + Math.cos(angleRad) * t, baselineY + Math.sin(angleRad) * t);
+    }
+    ctx.restore();
+  }
+
+  if (effects.echo?.enabled) {
+    ctx.save();
+    const count = 3;
+    const spread = ((effects.echo.spread ?? 50) / 100) * 8 * scale + 2 * scale;
+    const angleRad = ((effects.echo.angle ?? 45) * Math.PI) / 180;
+    for (let i = 1; i <= count; i++) {
+      ctx.fillStyle = effects.echo.color || token.color || '#FFF8E7';
+      ctx.globalAlpha = ((effects.echo.opacity ?? 50) / 100) / (i + 0.5);
+      ctx.fillText(token.text, tokenX + Math.cos(angleRad) * spread * i, baselineY + Math.sin(angleRad) * spread * i);
+    }
+    ctx.restore();
+  }
+
+  if (effects.glitch?.enabled) {
+    ctx.save();
+    const dist = (((effects.glitch.intensity ?? 50) / 100) * 6 + 1.5) * scale;
+    ctx.globalAlpha = 0.75;
+    ctx.fillStyle = '#FF0033';
+    ctx.fillText(token.text, tokenX - dist, baselineY);
+    ctx.fillStyle = '#00F0FF';
+    ctx.fillText(token.text, tokenX + dist, baselineY);
+    ctx.restore();
+  }
+
+  if (effects.chromatic?.enabled) {
+    ctx.save();
+    const dist = (((effects.chromatic.intensity ?? 50) / 100) * 5 + 1.5) * scale;
+    const angleRad = ((effects.chromatic.angle ?? 0) * Math.PI) / 180;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = '#FF0000';
+    ctx.fillText(token.text, tokenX + Math.cos(angleRad) * dist, baselineY + Math.sin(angleRad) * dist);
+    ctx.fillStyle = '#0000FF';
+    ctx.fillText(token.text, tokenX - Math.cos(angleRad) * dist, baselineY - Math.sin(angleRad) * dist);
+    ctx.restore();
+  }
+
+  if (effects.doubleExposure?.enabled) {
+    ctx.save();
+    const dist = (((effects.doubleExposure.intensity ?? 50) / 100) * 7 + 2) * scale;
+    ctx.globalAlpha = (effects.doubleExposure.opacity ?? 60) / 100;
+    ctx.fillStyle = effects.doubleExposure.color || '#FF3366';
+    ctx.fillText(token.text, tokenX + dist, baselineY + dist * 0.5);
+    ctx.restore();
+  }
+
+  if (effects.lift?.enabled) {
+    ctx.save();
+    ctx.shadowColor = effects.lift.color || 'rgba(0,0,0,0.5)';
+    ctx.shadowBlur = (effects.lift.blur ?? 12) * scale;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 6 * scale;
+    ctx.fillText(token.text, tokenX, baselineY);
+    ctx.restore();
+  }
+
+  if (effects.hardShadow?.enabled) {
+    ctx.save();
+    ctx.fillStyle = effects.hardShadow.color || '#000000';
+    ctx.globalAlpha = (effects.hardShadow.opacity ?? 100) / 100;
+    const dist = (((effects.hardShadow.intensity ?? 50) / 100) * 6 + 2) * scale;
+    const angleRad = ((effects.hardShadow.angle ?? 45) * Math.PI) / 180;
+    ctx.fillText(token.text, tokenX + Math.cos(angleRad) * dist, baselineY + Math.sin(angleRad) * dist);
+    ctx.restore();
+  }
+
+  if (effects.splice?.enabled) {
+    ctx.save();
+    ctx.fillStyle = effects.splice.color2 || '#E63946';
+    const dist = 3.5 * scale;
+    ctx.fillText(token.text, tokenX + dist, baselineY + dist);
+    ctx.strokeStyle = effects.splice.color || '#000000';
+    ctx.lineWidth = 2 * scale;
+    ctx.strokeText(token.text, tokenX, baselineY);
+    ctx.restore();
+  }
+
+  if (effects.shadow?.enabled) {
+    ctx.save();
+    ctx.shadowColor = effects.shadow.color || '#000000';
+    ctx.globalAlpha = (effects.shadow.opacity ?? 100) / 100;
+    ctx.shadowBlur = (effects.shadow.blur !== undefined ? effects.shadow.blur : 6) * scale;
+    ctx.shadowOffsetX = (effects.shadow.offsetX !== undefined ? effects.shadow.offsetX : 3) * scale;
+    ctx.shadowOffsetY = (effects.shadow.offsetY !== undefined ? effects.shadow.offsetY : 3) * scale;
+    ctx.fillText(token.text, tokenX, baselineY);
+    ctx.restore();
+  } else if (box.shadow) {
+    ctx.save();
+    ctx.shadowColor = box.shadow.color;
+    ctx.shadowBlur = box.shadow.blur * scale;
+    ctx.shadowOffsetX = box.shadow.offsetX * scale;
+    ctx.shadowOffsetY = box.shadow.offsetY * scale;
+    ctx.fillText(token.text, tokenX, baselineY);
+    ctx.restore();
+  }
+
+  // 3. GLOW & NEON
+  if (effects.glow?.enabled) {
+    ctx.save();
+    ctx.shadowColor = effects.glow.color || '#D4AF37';
+    ctx.globalAlpha = (effects.glow.opacity ?? 100) / 100;
+    const strength =
+      effects.glow.strength ||
+      effects.glow.blur ||
+      (((effects.glow.intensity ?? 50) / 100) * 20 + 6);
+    for (let p = 1; p <= 3; p++) {
+      ctx.shadowBlur = (strength * scale * p) / 2;
+      ctx.fillText(token.text, tokenX, baselineY);
+    }
+    ctx.restore();
+  }
+
+  if (effects.neon?.enabled) {
+    ctx.save();
+    const neonCol = effects.neon.color || '#00FFCC';
+    ctx.shadowColor = neonCol;
+    ctx.globalAlpha = (effects.neon.opacity ?? 100) / 100;
+    const blur = (effects.neon.blur !== undefined ? effects.neon.blur : 16) * scale;
+    ctx.shadowBlur = blur;
+    ctx.fillText(token.text, tokenX, baselineY);
+    ctx.shadowBlur = blur / 2;
+    ctx.fillText(token.text, tokenX, baselineY);
+    ctx.strokeStyle = neonCol;
+    ctx.lineWidth = 1.5 * scale;
+    ctx.strokeText(token.text, tokenX, baselineY);
+    ctx.restore();
+  }
+
+  // 4. OUTLINE (Under fill so letters stay sharp)
+  if (effects.outline?.enabled) {
+    ctx.save();
+    ctx.strokeStyle = effects.outline.color || '#000000';
+    ctx.globalAlpha = (effects.outline.opacity ?? 100) / 100;
+    const w =
+      effects.outline.width !== undefined
+        ? effects.outline.width
+        : (((effects.outline.intensity ?? 50) / 100) * 3 + 1);
+    ctx.lineWidth = w * scale * 2;
+    ctx.strokeText(token.text, tokenX, baselineY);
+    ctx.restore();
+  } else if (box.stroke && box.stroke.width > 0) {
+    ctx.save();
+    ctx.strokeStyle = box.stroke.color;
+    ctx.lineWidth = box.stroke.width * scale * 2;
+    ctx.strokeText(token.text, tokenX, baselineY);
+    ctx.restore();
+  }
+
+  // 5. FILL (Gradient, Hollow, Wavy, Neon bright core, or normal fill)
+  if (effects.hollow?.enabled) {
+    ctx.save();
+    ctx.strokeStyle = effects.hollow.color || token.color || '#FFF8E7';
+    ctx.globalAlpha = (effects.hollow.opacity ?? 100) / 100;
+    const w = effects.hollow.width !== undefined ? effects.hollow.width : 2;
+    ctx.lineWidth = Math.max(1, Math.round(w * scale));
+    ctx.strokeText(token.text, tokenX, baselineY);
+    ctx.restore();
+  } else if (effects.gradient?.enabled) {
+    ctx.save();
+    const angleRad = ((effects.gradient.angle ?? 90) * Math.PI) / 180;
+    const grad = ctx.createLinearGradient(
+      tokenX,
+      baselineY - token.fontSize,
+      tokenX + Math.cos(angleRad) * token.width,
+      baselineY + Math.sin(angleRad) * token.fontSize
+    );
+    grad.addColorStop(0, effects.gradient.color || token.color || '#D4AF37');
+    grad.addColorStop(1, effects.gradient.color2 || '#FFFFFF');
+    ctx.fillStyle = grad;
+    ctx.fillText(token.text, tokenX, baselineY);
+    ctx.restore();
+  } else if (effects.wavy?.enabled) {
+    ctx.save();
+    ctx.fillStyle = token.color || '#FFF8E7';
+    const amp = (((effects.wavy.intensity ?? 50) / 100) * 8 + 2) * scale;
+    const freq = ((effects.wavy.spread ?? 50) / 100) * 0.4 + 0.2;
+    let charX = tokenX;
+    for (let c = 0; c < token.text.length; c++) {
+      const ch = token.text[c];
+      const chW = ctx.measureText(ch).width;
+      const waveY = Math.sin(c * freq) * amp;
+      ctx.fillText(ch, charX, baselineY + waveY);
+      charX += chW;
+    }
+    ctx.restore();
+  } else if (effects.neon?.enabled) {
+    ctx.save();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillText(token.text, tokenX, baselineY);
+    ctx.restore();
+  } else {
+    ctx.fillStyle = token.color || '#FFF8E7';
+    ctx.fillText(token.text, tokenX, baselineY);
+    if (token.fontWeight === '800') {
+      ctx.save();
+      ctx.lineWidth = Math.max(0.6 * scale, 0.4);
+      ctx.strokeStyle = token.color || '#FFF8E7';
+      ctx.strokeText(token.text, tokenX, baselineY);
+      ctx.restore();
+    }
+  }
+
+  // 6. PROCEDURAL TEXTURES (Chalk, Ink, Fabric)
+  if (effects.chalk?.enabled) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-out';
+    const count = Math.round((token.text.length * 15 * (effects.chalk.intensity ?? 50)) / 100) + 10;
+    for (let i = 0; i < count; i++) {
+      const sx = tokenX + rand() * token.width;
+      const sy = baselineY - token.fontSize * 0.85 + rand() * token.fontSize;
+      const r = rand() * 1.5 * scale + 0.5 * scale;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  if (effects.ink?.enabled) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-out';
+    const count = Math.round((token.text.length * 8 * (effects.ink.intensity ?? 50)) / 100) + 4;
+    for (let i = 0; i < count; i++) {
+      const sx = tokenX + rand() * token.width;
+      const sy = baselineY - token.fontSize * 0.8 + rand() * token.fontSize;
+      const r = rand() * 2 * scale + 1 * scale;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  if (effects.fabric?.enabled) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.globalAlpha = ((effects.fabric.intensity ?? 50) / 100) * 0.45;
+    ctx.lineWidth = 1 * scale;
+    const spacing = ((effects.fabric.spread ?? 50) / 100) * 6 * scale + 3 * scale;
+    for (let x = tokenX; x < tokenX + token.width; x += spacing) {
+      ctx.beginPath();
+      ctx.moveTo(x, baselineY - token.fontSize);
+      ctx.lineTo(x, baselineY + token.fontSize * 0.3);
+      ctx.stroke();
+    }
+    for (let y = baselineY - token.fontSize; y < baselineY + token.fontSize * 0.3; y += spacing) {
+      ctx.beginPath();
+      ctx.moveTo(tokenX, y);
+      ctx.lineTo(tokenX + token.width, y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // 7. ARTISTIC & LIQUID (Stencil, Halftone, Droplets, Melting, Dripping)
+  if (effects.stencil?.enabled) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-out';
+    const gapW = (((effects.stencil.spread ?? 50) / 100) * 3 + 1.5) * scale;
+    const cuts = Math.min(3, Math.max(1, Math.floor(token.text.length / 2)));
+    for (let i = 1; i <= cuts; i++) {
+      const cutX = tokenX + (token.width / (cuts + 1)) * i;
+      ctx.fillRect(cutX - gapW / 2, baselineY - token.fontSize * 0.9, gapW, token.fontSize * 1.2);
+    }
+    ctx.restore();
+  }
+
+  if (effects.halftone?.enabled) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-out';
+    const dotSpacing = (((effects.halftone.spread ?? 50) / 100) * 5 + 3) * scale;
+    const dotRadius = Math.max(0.6 * scale, dotSpacing * 0.22);
+    for (let x = tokenX; x < tokenX + token.width; x += dotSpacing) {
+      for (let y = baselineY - token.fontSize * 0.85; y < baselineY + token.fontSize * 0.25; y += dotSpacing) {
+        ctx.beginPath();
+        ctx.arc(x, y, dotRadius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  if (effects.droplets?.enabled) {
+    ctx.save();
+    const count = Math.min(6, Math.max(2, Math.floor(token.text.length * 0.8)));
+    for (let i = 0; i < count; i++) {
+      const dx = tokenX + rand() * token.width;
+      const dy = baselineY - token.fontSize * 0.7 + rand() * (token.fontSize * 0.8);
+      const dr = (rand() * 2 + 1.5) * scale;
+      // Drop body
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+      ctx.shadowColor = 'rgba(0,0,0,0.4)';
+      ctx.shadowBlur = 2 * scale;
+      ctx.beginPath();
+      ctx.arc(dx, dy, dr, 0, Math.PI * 2);
+      ctx.fill();
+      // Specular highlight
+      ctx.shadowColor = 'transparent';
+      ctx.fillStyle = '#FFFFFF';
+      ctx.beginPath();
+      ctx.arc(dx - dr * 0.3, dy - dr * 0.3, dr * 0.35, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  if (effects.dripping?.enabled || effects.melting?.enabled) {
+    ctx.save();
+    const dripLen = (((effects.dripping?.intensity || effects.melting?.intensity || 50) / 100) * 14 + 4) * scale;
+    const dripColor = token.color || '#FFF8E7';
+    ctx.fillStyle = dripColor;
+    const numDrips = Math.max(2, Math.floor(token.text.length / 2));
+    for (let i = 0; i < numDrips; i++) {
+      const dripX = tokenX + rand() * (token.width - 4 * scale) + 2 * scale;
+      const len = rand() * dripLen + 2 * scale;
+      const radius = (rand() * 1.5 + 1.2) * scale;
+      ctx.beginPath();
+      ctx.moveTo(dripX - radius * 0.8, baselineY);
+      ctx.lineTo(dripX - radius * 0.5, baselineY + len - radius);
+      ctx.arc(dripX, baselineY + len, radius, 0, Math.PI);
+      ctx.lineTo(dripX + radius * 0.8, baselineY);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // 8. UNDERLINE & STRIKETHROUGH
+  if (token.underline) {
+    ctx.save();
+    ctx.shadowColor = 'transparent';
+    ctx.strokeStyle = token.color || '#FFF8E7';
+    ctx.lineWidth = Math.max(1, Math.round(1.5 * scale));
+    ctx.beginPath();
+    ctx.moveTo(tokenX, baselineY + 3 * scale);
+    ctx.lineTo(tokenX + token.width, baselineY + 3 * scale);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (token.strike) {
+    ctx.save();
+    ctx.shadowColor = 'transparent';
+    ctx.strokeStyle = token.color || '#FFF8E7';
+    ctx.lineWidth = Math.max(1, Math.round(1.5 * scale));
+    const strikeY = baselineY - token.fontSize * 0.32;
+    ctx.beginPath();
+    ctx.moveTo(tokenX, strikeY);
+    ctx.lineTo(tokenX + token.width, strikeY);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  ctx.restore();
 }
 
 export interface RenderCanvasOptions {
@@ -454,75 +913,7 @@ export async function renderDesignToCanvas(
           continue;
         }
 
-        ctx.save();
-        ctx.font = `${token.fontStyle} ${token.fontWeight} ${token.fontSize}px "${token.fontFamily}", sans-serif`;
-
-        if (token.letterSpacing && typeof (ctx as any).letterSpacing !== 'undefined') {
-          (ctx as any).letterSpacing = `${token.letterSpacing}px`;
-        }
-
-        // Apply Glow or Shadow Effect
-        const effects = token.effects;
-        if (effects?.glow?.enabled && effects.glow.strength > 0) {
-          ctx.shadowColor = effects.glow.color;
-          ctx.shadowBlur = effects.glow.strength * scale;
-          ctx.shadowOffsetX = 0;
-          ctx.shadowOffsetY = 0;
-        } else if (effects?.shadow?.enabled && effects.shadow) {
-          ctx.shadowColor = effects.shadow.color;
-          ctx.shadowBlur = effects.shadow.blur * scale;
-          ctx.shadowOffsetX = effects.shadow.offsetX * scale;
-          ctx.shadowOffsetY = effects.shadow.offsetY * scale;
-        } else if (box.shadow) {
-          ctx.shadowColor = box.shadow.color;
-          ctx.shadowBlur = box.shadow.blur * scale;
-          ctx.shadowOffsetX = box.shadow.offsetX * scale;
-          ctx.shadowOffsetY = box.shadow.offsetY * scale;
-        }
-
-        // Optional Outline / Stroke
-        if (effects?.outline?.enabled && effects.outline.width > 0) {
-          ctx.strokeStyle = effects.outline.color;
-          ctx.lineWidth = effects.outline.width * scale;
-          ctx.strokeText(token.text, tokenX, baselineY);
-        } else if (box.stroke && box.stroke.width > 0) {
-          ctx.strokeStyle = box.stroke.color;
-          ctx.lineWidth = box.stroke.width * scale;
-          ctx.strokeText(token.text, tokenX, baselineY);
-        }
-
-        // Fill text
-        ctx.fillStyle = token.color || '#FFF8E7';
-        ctx.fillText(token.text, tokenX, baselineY);
-
-        // Underline
-        if (token.underline) {
-          ctx.save();
-          ctx.shadowColor = 'transparent';
-          ctx.strokeStyle = token.color;
-          ctx.lineWidth = Math.max(1, Math.round(1.5 * scale));
-          ctx.beginPath();
-          ctx.moveTo(tokenX, baselineY + 3 * scale);
-          ctx.lineTo(tokenX + token.width, baselineY + 3 * scale);
-          ctx.stroke();
-          ctx.restore();
-        }
-
-        // Strikethrough
-        if (token.strike) {
-          ctx.save();
-          ctx.shadowColor = 'transparent';
-          ctx.strokeStyle = token.color;
-          ctx.lineWidth = Math.max(1, Math.round(1.5 * scale));
-          const strikeY = baselineY - token.fontSize * 0.32;
-          ctx.beginPath();
-          ctx.moveTo(tokenX, strikeY);
-          ctx.lineTo(tokenX + token.width, strikeY);
-          ctx.stroke();
-          ctx.restore();
-        }
-
-        ctx.restore();
+        drawStyledTokenWithEffects(ctx, token, tokenX, baselineY, scale, box);
         tokenX += token.width;
       }
 

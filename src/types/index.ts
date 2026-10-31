@@ -4,24 +4,53 @@
  * scaled to each image from a 1000px baseline.
  */
 
+export interface EffectItemSettings {
+  enabled?: boolean;
+  intensity?: number; // 0 - 100
+  color?: string;
+  color2?: string;
+  angle?: number; // 0 - 360
+  blur?: number; // 0 - 50
+  opacity?: number; // 0 - 100
+  spread?: number; // 0 - 100
+  offsetX?: number;
+  offsetY?: number;
+  width?: number;
+  strength?: number;
+}
+
 export interface TextRunEffect {
-  shadow?: {
-    enabled?: boolean;
-    color: string;
-    blur: number;
-    offsetX: number;
-    offsetY: number;
-  };
-  outline?: {
-    enabled?: boolean;
-    color: string;
-    width: number;
-  };
-  glow?: {
-    enabled?: boolean;
-    color: string;
-    strength: number; // drawn as blurred glow shadow
-  };
+  [key: string]: any;
+  shadow?: EffectItemSettings;
+  outline?: EffectItemSettings;
+  glow?: EffectItemSettings;
+  // Standard Canva/Adobe style effects
+  lift?: EffectItemSettings;
+  hardShadow?: EffectItemSettings;
+  hollow?: EffectItemSettings;
+  neon?: EffectItemSettings;
+  echo?: EffectItemSettings;
+  splice?: EffectItemSettings;
+  highlight?: EffectItemSettings;
+  gradient?: EffectItemSettings;
+  glitch?: EffectItemSettings;
+  extrude?: EffectItemSettings;
+  pill?: EffectItemSettings;
+  // Group A: Textures
+  chalk?: EffectItemSettings;
+  ink?: EffectItemSettings;
+  fabric?: EffectItemSettings;
+  // Group B: Artistic
+  chromatic?: EffectItemSettings;
+  halftone?: EffectItemSettings;
+  stencil?: EffectItemSettings;
+  doubleExposure?: EffectItemSettings;
+  wavy?: EffectItemSettings;
+  // Group C: Liquid
+  droplets?: EffectItemSettings;
+  liquid?: EffectItemSettings;
+  melting?: EffectItemSettings;
+  dripping?: EffectItemSettings;
 }
 
 export interface TextRun {

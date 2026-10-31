@@ -332,9 +332,63 @@ export function populateDesignsFromSpreadsheet(
       for (const [fieldLabel, colName] of Object.entries(mappings)) {
         if (colName && row[colName] !== undefined) {
           const rawCell = row[colName];
-          const { plainText, runs } = parseMarkdownRuns(rawCell);
+          const { plainText, runs: parsedRuns } = parseMarkdownRuns(rawCell);
           updatedValues[fieldLabel] = plainText;
-          updatedRichValues[fieldLabel] = runs;
+
+          // Preserve existing word styling if word text stays the same
+          const existingRuns = page.richValues?.[fieldLabel];
+          if (existingRuns && existingRuns.length > 0) {
+            const wordStyleMap = new Map<string, Partial<TextRun>>();
+            for (const r of existingRuns) {
+              const trimmed = r.text.trim();
+              if (
+                trimmed &&
+                (r.bold || r.italic || r.underline || r.strike || r.color || r.fontFamily || r.fontSize || r.letterSpacing || r.effects)
+              ) {
+                wordStyleMap.set(trimmed.toLowerCase(), {
+                  bold: r.bold,
+                  italic: r.italic,
+                  underline: r.underline,
+                  strike: r.strike,
+                  color: r.color,
+                  fontFamily: r.fontFamily,
+                  fontSize: r.fontSize,
+                  letterSpacing: r.letterSpacing,
+                  effects: r.effects,
+                });
+              }
+            }
+
+            const preservedRuns: TextRun[] = [];
+            for (const pr of parsedRuns) {
+              const parts = pr.text.split(/(\s+)/);
+              for (const part of parts) {
+                if (!part) continue;
+                const match = wordStyleMap.get(part.trim().toLowerCase());
+                if (match && /\S/.test(part)) {
+                  preservedRuns.push({
+                    text: part,
+                    ...match,
+                    bold: pr.bold !== undefined ? pr.bold : match.bold,
+                    italic: pr.italic !== undefined ? pr.italic : match.italic,
+                    underline: pr.underline !== undefined ? pr.underline : match.underline,
+                    strike: pr.strike !== undefined ? pr.strike : match.strike,
+                  });
+                } else {
+                  preservedRuns.push({
+                    text: part,
+                    bold: pr.bold,
+                    italic: pr.italic,
+                    underline: pr.underline,
+                    strike: pr.strike,
+                  });
+                }
+              }
+            }
+            updatedRichValues[fieldLabel] = preservedRuns;
+          } else {
+            updatedRichValues[fieldLabel] = parsedRuns;
+          }
         }
       }
 
