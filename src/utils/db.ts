@@ -13,14 +13,16 @@ import {
   StoredImageRecord,
   StoredFontRecord,
   StorageBreakdown,
+  SavedTemplate,
 } from '../types';
 
 const DB_NAME = 'litdom_batch_studio_v2';
 const OLD_DB_NAME = 'litdom_batch_studio_db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_PROJECTS = 'projects';
 const STORE_IMAGES = 'images';
 const STORE_FONTS = 'fonts';
+const STORE_TEMPLATES = 'saved_templates';
 
 let dbInstance: IDBDatabase | null = null;
 let dbConnectingPromise: Promise<IDBDatabase> | null = null;
@@ -96,6 +98,9 @@ export function getDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_FONTS)) {
         db.createObjectStore(STORE_FONTS, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(STORE_TEMPLATES)) {
+        db.createObjectStore(STORE_TEMPLATES, { keyPath: 'id' });
       }
     };
 
@@ -977,3 +982,51 @@ export async function deleteAllFonts(): Promise<void> {
     req.onerror = () => reject(new Error('Failed to clear custom fonts.'));
   });
 }
+
+/**
+ * Saved Reusable Template operations
+ */
+export async function saveSavedTemplate(tpl: SavedTemplate): Promise<void> {
+  const db = await getDB();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_TEMPLATES, 'readwrite');
+    const store = tx.objectStore(STORE_TEMPLATES);
+    const req = store.put(tpl);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(new Error('Failed to save reusable template.'));
+  });
+}
+
+export async function getAllSavedTemplates(): Promise<SavedTemplate[]> {
+  const db = await getDB();
+  return new Promise<SavedTemplate[]>((resolve, reject) => {
+    const tx = db.transaction(STORE_TEMPLATES, 'readonly');
+    const store = tx.objectStore(STORE_TEMPLATES);
+    const req = store.getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(new Error('Failed to retrieve saved templates.'));
+  });
+}
+
+export async function getSavedTemplate(id: string): Promise<SavedTemplate | null> {
+  const db = await getDB();
+  return new Promise<SavedTemplate | null>((resolve, reject) => {
+    const tx = db.transaction(STORE_TEMPLATES, 'readonly');
+    const store = tx.objectStore(STORE_TEMPLATES);
+    const req = store.get(id);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(new Error('Failed to retrieve saved template.'));
+  });
+}
+
+export async function deleteSavedTemplate(id: string): Promise<void> {
+  const db = await getDB();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_TEMPLATES, 'readwrite');
+    const store = tx.objectStore(STORE_TEMPLATES);
+    const req = store.delete(id);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(new Error('Failed to delete saved template.'));
+  });
+}
+

@@ -1,27 +1,34 @@
 /**
  * Litdom Batch Studio - Screen 1: Dashboard
- * Create project (opens workspace immediately), open existing, delete with in-app confirm,
- * and display real-time storage quota.
+ * Exact visual match to IMG_1495 (2).pdf Page 1:
+ * - Golden yellow theme (#E5B224)
+ * - Header: "LITDOM BATCH STUDIOS" with notification bell, settings, and user profile icons
+ * - Pill search bar: "Search here ..."
+ * - Create a Project section with 3 cards: Document (DOCX), Images (Single/Bulk), Sheet (Spreadsheet)
+ * - Your Projects grid with folder icon, 3-bar menu (Download, Edit, Delete, Save as Template), and preview thumbnail
+ * - Storage section with Used (red) and Available (green) indicators
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
-  Plus,
-  FolderOpen,
-  Trash2,
-  HardDrive,
-  Layers,
-  Sparkles,
-  Clock,
-  AlertCircle,
+  Bell,
+  Settings,
+  User,
+  Search,
+  FileText,
+  Image as ImageIcon,
   FileSpreadsheet,
-  Type,
-  RefreshCw,
+  Folder,
+  Menu,
+  Download,
+  Edit,
+  Trash2,
+  BookmarkPlus,
   AlertTriangle,
-  CheckCircle2,
-  ShieldAlert,
+  X,
+  Check,
 } from 'lucide-react';
-import { Project, StorageBreakdown } from '../types';
+import { Project, StorageBreakdown, SavedTemplate } from '../types';
 import {
   getAllProjects,
   saveProject,
@@ -29,10 +36,15 @@ import {
   createDefaultTemplate,
   getStorageEstimate,
   calculateExactStorageBreakdown,
-  cleanupOrphanedImages,
-  eraseEverything,
+  storeImageFile,
   formatBytes,
+  saveSavedTemplate,
+  getAllSavedTemplates,
+  getThumbnailBlob,
+  createManagedObjectUrl,
 } from '../utils/db';
+import { DocxWorkflowModal } from './DocxWorkflowModal';
+import * as XLSX from 'xlsx';
 
 interface DashboardProps {
   onOpenProject: (projectId: string) => void;
@@ -41,10 +53,10 @@ interface DashboardProps {
 export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
-  const [newProjectName, setNewProjectName] = useState('');
-  const [isCleaning, setIsCleaning] = useState(false);
-  const [cleanFeedback, setCleanFeedback] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeMenuProjectId, setActiveMenuProjectId] = useState<string | null>(null);
 
+  // Storage State
   const [storageBreakdown, setStorageBreakdown] = useState<StorageBreakdown>({
     designsBytes: 0,
     fontsBytes: 0,
@@ -52,27 +64,63 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
     totalBytes: 0,
     projectSizes: {},
   });
-
   const [storageEstimate, setStorageEstimate] = useState<{
     usedBytes: number;
     quotaBytes: number;
     percentage: number;
-  }>({ usedBytes: 0, quotaBytes: 0, percentage: 0 });
+  }>({ usedBytes: 0, quotaBytes: 1073741824, percentage: 0 });
 
+  // Thumbnail URLs: projectId -> objectUrl
+  const [projectThumbnails, setProjectThumbnails] = useState<Record<string, string>>({});
+
+  // Workflow Modals & Inputs
+  const [isDocxModalOpen, setIsDocxModalOpen] = useState(false);
+  const [isTemplateSelectorOpen, setIsTemplateSelectorOpen] = useState(false);
+  const [pendingSheetData, setPendingSheetData] = useState<{
+    filename: string;
+    headers: string[];
+    rows: Record<string, string>[];
+  } | null>(null);
+
+  const [savedTemplatesList, setSavedTemplatesList] = useState<SavedTemplate[]>([]);
+
+  // File Input Refs
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const sheetInputRef = useRef<HTMLInputElement>(null);
+
+  // Project Delete Confirmation
   const [projectToDelete, setProjectToDelete] = useState<Project | null>(null);
-  const [eraseStep, setEraseStep] = useState<0 | 1 | 2>(0);
-  const [isErasing, setIsErasing] = useState(false);
+  const [feedbackToast, setFeedbackToast] = useState<string | null>(null);
 
-  const loadDashboardData = async () => {
+  const showToast = (msg: string) => {
+    setFeedbackToast(msg);
+    setTimeout(() => setFeedbackToast(null), 3500);
+  };
+
+  const loadData = async () => {
     try {
-      const [list, breakdown, estimate] = await Promise.all([
+      const [list, breakdown, estimate, tpls] = await Promise.all([
         getAllProjects(),
         calculateExactStorageBreakdown(),
         getStorageEstimate(),
+        getAllSavedTemplates(),
       ]);
       setProjects(list);
       setStorageBreakdown(breakdown);
       setStorageEstimate(estimate);
+      setSavedTemplatesList(tpls);
+
+      // Load thumbnail for first page of each project
+      const thumbs: Record<string, string> = {};
+      for (const p of list) {
+        if (p.pages.length > 0 && p.pages[0].imageId) {
+          const blob = await getThumbnailBlob(p.pages[0].imageId);
+          if (blob) {
+            thumbs[p.id] = createManagedObjectUrl(blob);
+          }
+        }
+      }
+      setProjectThumbnails(thumbs);
     } catch (err) {
       console.error('Failed to load dashboard data:', err);
     } finally {
@@ -81,29 +129,200 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
   };
 
   useEffect(() => {
-    loadDashboardData();
-    // Silently clean up orphaned images on app mount
-    cleanupOrphanedImages().catch(() => {});
+    loadData();
   }, []);
 
-  const handleCreateProject = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const name = newProjectName.trim() || 'Untitled Project';
-    const newProj: Project = {
-      id: `proj_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      name,
+  // 1. Image Workflow: Single or Bulk Images Upload
+  const handleImagesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    setLoading(true);
+    const pages: any[] = [];
+    const baseTemplate = createDefaultTemplate();
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (!file.type.startsWith('image/')) continue;
+      try {
+        const stored = await storeImageFile(file);
+        pages.push({
+          id: `page_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`,
+          imageId: stored.imageId,
+          name: file.name.replace(/\.[^/.]+$/, ''),
+          width: stored.width,
+          height: stored.height,
+          values: {
+            Title: file.name.replace(/\.[^/.]+$/, ''),
+            Subtitle: 'Your Subtitle Here',
+          },
+          textBoxes: JSON.parse(JSON.stringify(baseTemplate)),
+        });
+      } catch (err) {
+        console.error('Failed storing image file:', err);
+      }
+    }
+
+    if (pages.length === 0) {
+      setLoading(false);
+      return;
+    }
+
+    const firstFileName = files[0].name.replace(/\.[^/.]+$/, '');
+    const newProject: Project = {
+      id: `proj_img_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      name: pages.length === 1 ? firstFileName : `${firstFileName} (Batch of ${pages.length})`,
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      template: createDefaultTemplate(),
-      pages: [],
+      template: baseTemplate,
+      pages,
+    };
+
+    await saveProject(newProject);
+    setLoading(false);
+    onOpenProject(newProject.id);
+  };
+
+  // 2. Spreadsheet Workflow: Upload Sheet
+  const handleSheetSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const wb = XLSX.read(buffer, { type: 'array' });
+      const sheetName = wb.SheetNames[0];
+      const sheet = wb.Sheets[sheetName];
+      const json = XLSX.utils.sheet_to_json<Record<string, any>>(sheet, { defval: '' });
+
+      if (json.length === 0) {
+        showToast('Spreadsheet contains no data rows.');
+        return;
+      }
+
+      const headers = Object.keys(json[0] || {});
+      const cleanRows = json.map((row) => {
+        const r: Record<string, string> = {};
+        for (const [k, v] of Object.entries(row)) {
+          r[k] = v !== undefined && v !== null ? String(v) : '';
+        }
+        return r;
+      });
+
+      setPendingSheetData({
+        filename: file.name.replace(/\.[^/.]+$/, ''),
+        headers,
+        rows: cleanRows,
+      });
+
+      // Open template selector dialog (Saved template or Plain-white)
+      setIsTemplateSelectorOpen(true);
+    } catch (err) {
+      console.error('Failed parsing sheet:', err);
+      showToast('Could not parse spreadsheet file.');
+    }
+  };
+
+  // Populate Spreadsheet into chosen template or Plain-White
+  const handleApplyTemplateToSpreadsheet = async (chosenTemplate?: SavedTemplate) => {
+    if (!pendingSheetData) return;
+    setLoading(true);
+
+    const baseTemplate: any[] = chosenTemplate
+      ? chosenTemplate.template
+      : createDefaultTemplate();
+
+    const pages: any[] = [];
+    const rows = pendingSheetData.rows;
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      let imageId = chosenTemplate?.imageId;
+      let imgW = chosenTemplate?.width || 1080;
+      let imgH = chosenTemplate?.height || 1920;
+
+      // Plain white background
+      if (!imageId) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 1080;
+        canvas.height = 1920;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, 1080, 1920);
+        }
+        const blob = await new Promise<Blob>((res) => canvas.toBlob((b) => res(b!), 'image/png'));
+        const stored = await storeImageFile(blob);
+        imageId = stored.imageId;
+      }
+
+      const values: Record<string, string> = {};
+      baseTemplate.forEach((box) => {
+        const matchingCol = pendingSheetData.headers.find(
+          (h) => h.toLowerCase() === box.fieldLabel.toLowerCase()
+        ) || pendingSheetData.headers[0];
+        values[box.fieldLabel] = row[matchingCol] || '';
+      });
+
+      pages.push({
+        id: `page_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`,
+        imageId,
+        name: `Design ${i + 1}`,
+        width: imgW,
+        height: imgH,
+        values,
+        textBoxes: JSON.parse(JSON.stringify(baseTemplate)),
+      });
+    }
+
+    const newProject: Project = {
+      id: `proj_sheet_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      name: pendingSheetData.filename,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      template: baseTemplate,
+      pages,
+      lastSpreadsheet: {
+        filename: pendingSheetData.filename,
+        headers: pendingSheetData.headers,
+        rows: pendingSheetData.rows,
+        mappings: pendingSheetData.headers.reduce((acc, h) => ({ ...acc, [h]: h }), {}),
+      },
+    };
+
+    await saveProject(newProject);
+    setIsTemplateSelectorOpen(false);
+    setPendingSheetData(null);
+    setLoading(false);
+    onOpenProject(newProject.id);
+  };
+
+  // 3-Bar Menu Actions
+  const handleSaveProjectAsTemplate = async (p: Project) => {
+    setActiveMenuProjectId(null);
+    if (p.pages.length === 0) {
+      showToast('Project has no design pages to save as template.');
+      return;
+    }
+    const firstPage = p.pages[0];
+    const newTpl: SavedTemplate = {
+      id: `tpl_saved_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      name: `${p.name} Template`,
+      createdAt: Date.now(),
+      imageId: firstPage.imageId,
+      width: firstPage.width,
+      height: firstPage.height,
+      template: firstPage.textBoxes && firstPage.textBoxes.length > 0 ? firstPage.textBoxes : p.template,
     };
 
     try {
-      await saveProject(newProj);
-      setNewProjectName('');
-      onOpenProject(newProj.id);
+      await saveSavedTemplate(newTpl);
+      const list = await getAllSavedTemplates();
+      setSavedTemplatesList(list);
+      showToast('Saved as reusable template!');
     } catch (err) {
-      console.error('Error creating project:', err);
+      console.error('Error saving template:', err);
+      showToast('Failed to save template.');
     }
   };
 
@@ -112,399 +331,393 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
     try {
       await deleteProject(projectToDelete.id);
       setProjectToDelete(null);
-      await loadDashboardData();
+      await loadData();
+      showToast('Project deleted and storage freed.');
     } catch (err) {
       console.error('Error deleting project:', err);
+      showToast('Failed to delete project.');
     }
   };
 
-  const handleManualCleanup = async () => {
-    setIsCleaning(true);
-    setCleanFeedback(null);
-    try {
-      const res = await cleanupOrphanedImages();
-      await loadDashboardData();
-      if (res.deletedCount > 0) {
-        setCleanFeedback(`Cleaned up ${res.deletedCount} orphaned image(s), freed ${formatBytes(res.freedBytes)}.`);
-      } else {
-        setCleanFeedback('Storage is fully optimized. No orphaned assets found.');
-      }
-      setTimeout(() => setCleanFeedback(null), 5000);
-    } catch (err) {
-      console.error('Cleanup error:', err);
-      setCleanFeedback('Failed to perform cleanup.');
-    } finally {
-      setIsCleaning(false);
-    }
-  };
-
-  const handlePerformEraseEverything = async () => {
-    setIsErasing(true);
-    try {
-      await eraseEverything();
-    } catch (err) {
-      console.error('Erase error:', err);
-      setIsErasing(false);
-      setEraseStep(0);
-    }
-  };
+  const filteredProjects = projects.filter((p) =>
+    p.name.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
   return (
-    <div className="min-h-screen bg-[#0B0B0F] text-[#FFF8E7] flex flex-col font-sans">
-      {/* Top Header */}
-      <header className="border-b border-[#212128] bg-[#121217]/90 backdrop-blur-md sticky top-0 z-30 px-4 sm:px-8 py-3.5 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#D4AF37] to-[#8C7625] flex items-center justify-center shadow-lg shadow-[#D4AF37]/20">
-            <span className="text-[#0B0B0F] font-bold font-serif text-sm tracking-widest">L</span>
-          </div>
-          <div>
-            <h1 className="text-base sm:text-lg font-serif font-bold tracking-tight text-[#FFF8E7]">
-              Litdom Batch Studio
-            </h1>
-            <p className="text-[11px] text-[#D4AF37]/80 font-medium">
-              High-Speed Spreadsheet Design Population
-            </p>
+    <div className="min-h-[100dvh] bg-[#E5B224] text-[#0B0B0F] flex flex-col font-sans select-none pb-12">
+      {/* 1. BLACK HEADER (IMG_1495 (2).pdf Page 1) */}
+      <header className="bg-black text-white px-4 sm:px-6 py-4 flex flex-col gap-3 shadow-md">
+        <div className="flex items-center justify-between">
+          <h1 className="font-sans font-black text-base sm:text-lg tracking-wider text-white uppercase">
+            LITDOM BATCH STUDIOS
+          </h1>
+          <div className="flex items-center gap-3 text-white/80">
+            <button className="p-1 hover:text-white transition-colors" title="Notifications">
+              <Bell className="w-5 h-5" />
+            </button>
+            <button className="p-1 hover:text-white transition-colors" title="Settings">
+              <Settings className="w-5 h-5" />
+            </button>
+            <button className="p-1 hover:text-white transition-colors" title="Profile">
+              <User className="w-5 h-5" />
+            </button>
           </div>
         </div>
 
-        {/* Top Storage Indicator */}
-        <div className="flex items-center gap-2 bg-[#17171C] border border-[#262632] px-3 py-1.5 rounded-xl text-xs">
-          <HardDrive className="w-3.5 h-3.5 text-[#D4AF37]" />
-          <span className="text-[#FFF8E7]/70 hidden sm:inline">Your Data:</span>
-          <span className="font-mono text-[#D4AF37] font-semibold">
-            {formatBytes(storageBreakdown.totalBytes)}
-          </span>
+        {/* Search Bar in Header (Pill shaped, yellow background) */}
+        <div className="relative w-full max-w-md mx-auto">
+          <input
+            type="text"
+            placeholder="Search here ..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full bg-[#F0BC28] text-black placeholder-black/60 font-medium text-xs sm:text-sm px-4 py-2.5 rounded-full pr-10 focus:outline-none shadow-inner"
+          />
+          <Search className="w-4 h-4 text-black absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
         </div>
       </header>
 
-      {/* Main Container */}
-      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-8 py-6 space-y-6">
-        {/* Storage Quota Warning Banner */}
-        {storageEstimate.percentage >= 80 && (
-          <div className="bg-red-500/15 border border-red-500/40 rounded-2xl p-4 flex items-center justify-between gap-3 text-red-200 text-xs">
-            <div className="flex items-center gap-2.5">
-              <AlertTriangle className="w-5 h-5 text-red-400 shrink-0" />
-              <span>
-                <strong>Warning:</strong> Browser storage is at {storageEstimate.percentage}% of quota ({formatBytes(storageEstimate.usedBytes)} of {formatBytes(storageEstimate.quotaBytes)}). Consider deleting older projects or cleaning up unused assets.
-              </span>
-            </div>
-            <button
-              onClick={handleManualCleanup}
-              disabled={isCleaning}
-              className="bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-red-100 px-3 py-1.5 rounded-xl font-bold whitespace-nowrap min-h-[36px]"
-            >
-              Clean Up Now
-            </button>
+      {/* Main Body with Golden-Yellow Canvas Background */}
+      <main className="max-w-xl mx-auto w-full px-4 sm:px-6 pt-5 flex flex-col gap-5">
+        {/* Toast */}
+        {feedbackToast && (
+          <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 bg-[#16161D] text-[#FFF8E7] border border-[#D4AF37] px-4 py-2 rounded-xl text-xs font-semibold shadow-2xl flex items-center gap-2 animate-bounce">
+            <Check className="w-4 h-4 text-[#D4AF37]" />
+            <span>{feedbackToast}</span>
           </div>
         )}
 
-        {/* Create Project Hero Card */}
-        <div className="bg-gradient-to-r from-[#17171C] via-[#1A1A22] to-[#17171C] border border-[#2A2A36] rounded-2xl p-5 sm:p-6 shadow-2xl">
-          <div className="max-w-xl">
-            <h2 className="text-lg sm:text-xl font-serif font-bold text-[#FFF8E7] mb-1">
-              Create New Design Batch
-            </h2>
-            <p className="text-xs sm:text-sm text-[#FFF8E7]/60 mb-4">
-              Upload backgrounds, map CSV or Excel fields, customize fonts & styles, and export pixel-perfect batches in seconds.
-            </p>
-
-            <form onSubmit={handleCreateProject} className="flex flex-col sm:flex-row gap-2.5">
-              <input
-                type="text"
-                placeholder="Project Name (e.g., Summer Luxury Drop)"
-                value={newProjectName}
-                onChange={(e) => setNewProjectName(e.target.value)}
-                className="flex-1 bg-[#0B0B0F] border border-[#333342] focus:border-[#D4AF37] rounded-xl px-4 py-3 text-sm text-[#FFF8E7] placeholder-[#FFF8E7]/30 focus:outline-none transition-colors"
-                autoFocus
-              />
-              <button
-                type="submit"
-                className="bg-gradient-to-r from-[#D4AF37] to-[#F4D58D] hover:from-[#F4D58D] hover:to-[#D4AF37] text-[#0B0B0F] font-bold text-sm px-6 py-3 rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-[#D4AF37]/20 active:scale-[0.98] transition-all min-h-[44px]"
-              >
-                <Plus className="w-4 h-4 stroke-[2.5]" />
-                <span>Create & Open</span>
-              </button>
-            </form>
-          </div>
-        </div>
-
-        {/* Honest Storage Breakdown Card */}
-        <div className="bg-[#121217] border border-[#23232E] rounded-2xl p-5 space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <div className="flex items-center gap-2">
-                <HardDrive className="w-4 h-4 text-[#D4AF37]" />
-                <h3 className="text-sm font-semibold text-[#FFF8E7]">
-                  Your Storage Breakdown
-                </h3>
-              </div>
-              <p className="text-[11px] text-[#FFF8E7]/50 mt-0.5">
-                Exact sum of your stored assets. Reads 0 B when nothing is stored.
-              </p>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleManualCleanup}
-                disabled={isCleaning}
-                className="bg-[#1C1C24] hover:bg-[#262632] border border-[#2D2D3A] text-xs text-[#FFF8E7] px-3 py-1.5 rounded-xl flex items-center gap-1.5 transition-colors min-h-[36px]"
-                title="Remove unreferenced images and old databases"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 text-[#D4AF37] ${isCleaning ? 'animate-spin' : ''}`} />
-                <span>{isCleaning ? 'Cleaning…' : 'Clean Up'}</span>
-              </button>
-
-              <button
-                onClick={() => setEraseStep(1)}
-                className="bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-xs text-red-300 px-3 py-1.5 rounded-xl flex items-center gap-1.5 transition-colors min-h-[36px]"
-                title="Wipe all projects and stored data"
-              >
-                <Trash2 className="w-3.5 h-3.5 text-red-400" />
-                <span>Erase Everything</span>
-              </button>
-            </div>
+        {/* 2. CREATE A PROJECT SECTION */}
+        <section className="bg-black/90 backdrop-blur-md rounded-3xl p-5 text-white shadow-xl flex flex-col gap-4">
+          <div className="bg-[#B88E18]/80 text-white font-bold text-sm px-4 py-1.5 rounded-2xl w-fit shadow-sm">
+            Create a Project
           </div>
 
-          {cleanFeedback && (
-            <div className="p-2.5 bg-[#17171C] border border-[#D4AF37]/40 rounded-xl text-xs text-[#D4AF37] flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-[#D4AF37] shrink-0" />
-              <span>{cleanFeedback}</span>
-            </div>
-          )}
+          <div className="grid grid-cols-3 gap-3">
+            {/* Card 1: Document (Upload DOCX) */}
+            <button
+              onClick={() => setIsDocxModalOpen(true)}
+              className="bg-[#0B0B0F] hover:bg-[#1C1C24] border border-white/10 hover:border-[#D4AF37] rounded-2xl p-3 flex flex-col items-center justify-center gap-2 transition-all min-h-[110px] text-center group active:scale-95"
+            >
+              <div className="w-10 h-10 rounded-xl bg-blue-600/20 border border-blue-400 flex items-center justify-center text-blue-400 group-hover:scale-110 transition-transform">
+                <FileText className="w-5 h-5" />
+              </div>
+              <span className="text-[11px] font-bold text-white leading-tight">
+                Upload DOCX
+              </span>
+              <span className="text-[10px] text-white/50 -mt-1">Document</span>
+            </button>
 
-          {/* 4 Metric Pills */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div className="bg-[#17171C] border border-[#262632] rounded-xl p-3">
-              <div className="text-[10px] uppercase font-mono tracking-wider text-[#FFF8E7]/50 mb-1">
-                Designs & Images
+            {/* Card 2: Images (Upload Images) */}
+            <button
+              onClick={() => imageInputRef.current?.click()}
+              className="bg-[#0B0B0F] hover:bg-[#1C1C24] border border-white/10 hover:border-[#D4AF37] rounded-2xl p-3 flex flex-col items-center justify-center gap-2 transition-all min-h-[110px] text-center group active:scale-95"
+            >
+              <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-400 flex items-center justify-center text-amber-400 group-hover:scale-110 transition-transform">
+                <ImageIcon className="w-5 h-5" />
               </div>
-              <div className="text-base font-bold font-mono text-[#D4AF37]">
-                {formatBytes(storageBreakdown.designsBytes)}
-              </div>
-            </div>
+              <span className="text-[11px] font-bold text-white leading-tight">
+                Upload Images
+              </span>
+              <span className="text-[10px] text-white/50 -mt-1">Images</span>
+            </button>
 
-            <div className="bg-[#17171C] border border-[#262632] rounded-xl p-3">
-              <div className="text-[10px] uppercase font-mono tracking-wider text-[#FFF8E7]/50 mb-1">
-                Custom Fonts
+            {/* Card 3: Sheet (Upload Sheet) */}
+            <button
+              onClick={() => sheetInputRef.current?.click()}
+              className="bg-[#0B0B0F] hover:bg-[#1C1C24] border border-white/10 hover:border-[#D4AF37] rounded-2xl p-3 flex flex-col items-center justify-center gap-2 transition-all min-h-[110px] text-center group active:scale-95"
+            >
+              <div className="w-10 h-10 rounded-xl bg-emerald-600/20 border border-emerald-400 flex items-center justify-center text-emerald-400 group-hover:scale-110 transition-transform">
+                <FileSpreadsheet className="w-5 h-5" />
               </div>
-              <div className="text-base font-bold font-mono text-[#D4AF37]">
-                {formatBytes(storageBreakdown.fontsBytes)}
-              </div>
-            </div>
-
-            <div className="bg-[#17171C] border border-[#262632] rounded-xl p-3">
-              <div className="text-[10px] uppercase font-mono tracking-wider text-[#FFF8E7]/50 mb-1">
-                Project Layouts
-              </div>
-              <div className="text-base font-bold font-mono text-[#D4AF37]">
-                {formatBytes(storageBreakdown.projectsBytes)}
-              </div>
-            </div>
-
-            <div className="bg-[#17171C] border border-[#D4AF37]/30 bg-gradient-to-br from-[#17171C] to-[#21212B] rounded-xl p-3">
-              <div className="text-[10px] uppercase font-mono tracking-wider text-[#D4AF37] mb-1">
-                Total Used
-              </div>
-              <div className="text-base font-bold font-mono text-[#FFF8E7]">
-                {formatBytes(storageBreakdown.totalBytes)}
-              </div>
-            </div>
+              <span className="text-[11px] font-bold text-white leading-tight">
+                Upload Sheet
+              </span>
+              <span className="text-[10px] text-white/50 -mt-1">Sheet</span>
+            </button>
           </div>
+        </section>
 
-          <div className="text-[11px] text-[#FFF8E7]/40 flex flex-col sm:flex-row sm:items-center justify-between gap-1 pt-1 border-t border-[#1C1C24]">
-            <span>
-              Browser total (approximate): {formatBytes(storageEstimate.usedBytes)} of {formatBytes(storageEstimate.quotaBytes)} ({storageEstimate.percentage}%)
-            </span>
-            <span className="text-[10px] italic">
-              Browser total includes internal database indices and may update slowly.
-            </span>
-          </div>
-        </div>
+        {/* Hidden File Inputs for Images & Sheets */}
+        <input
+          type="file"
+          ref={imageInputRef}
+          multiple
+          accept="image/*"
+          onChange={handleImagesSelected}
+          className="hidden"
+        />
+        <input
+          type="file"
+          ref={sheetInputRef}
+          accept=".xlsx,.csv"
+          onChange={handleSheetSelected}
+          className="hidden"
+        />
 
-        {/* Existing Projects Section */}
-        <div className="space-y-3">
+        {/* 3. YOUR PROJECTS SECTION */}
+        <section className="bg-black/90 backdrop-blur-md rounded-3xl p-5 text-white shadow-xl flex flex-col gap-4">
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold uppercase tracking-wider text-[#D4AF37]">
-              Your Projects ({projects.length})
-            </h3>
+            <div className="bg-[#B88E18]/80 text-white font-bold text-sm px-4 py-1.5 rounded-2xl w-fit shadow-sm">
+              Your Projects
+            </div>
+            <span className="text-xs text-white/50">
+              {filteredProjects.length} project{filteredProjects.length === 1 ? '' : 's'}
+            </span>
           </div>
 
-          {loading ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-              {[1, 2, 3].map((n) => (
-                <div
-                  key={n}
-                  className="h-36 rounded-2xl bg-[#17171C]/50 animate-pulse border border-[#212128]"
-                />
-              ))}
-            </div>
-          ) : projects.length === 0 ? (
-            <div className="text-center py-16 border border-dashed border-[#262632] rounded-2xl bg-[#121217]/40 space-y-3">
-              <Layers className="w-10 h-10 text-[#D4AF37]/40 mx-auto" />
-              <div className="text-sm font-semibold text-[#FFF8E7]/80">No projects yet</div>
-              <p className="text-xs text-[#FFF8E7]/50 max-w-sm mx-auto">
-                Type a name above and click "Create & Open" to start your first batch.
-              </p>
+          {filteredProjects.length === 0 ? (
+            <div className="py-8 text-center text-white/60 text-xs">
+              {searchQuery ? 'No matching projects found.' : 'No projects yet. Upload a DOCX, Images, or Spreadsheet above!'}
             </div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {projects.map((proj) => {
-                const designCount = proj.pages?.length || 0;
-                const projSize = storageBreakdown.projectSizes[proj.id] || 0;
-                const formattedDate = new Date(proj.updatedAt).toLocaleDateString(undefined, {
-                  month: 'short',
-                  day: 'numeric',
-                  year: 'numeric',
-                });
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+              {filteredProjects.map((p) => {
+                const thumb = projectThumbnails[p.id];
+                const isMenuOpen = activeMenuProjectId === p.id;
 
                 return (
                   <div
-                    key={proj.id}
-                    className="bg-[#17171C] border border-[#262632] hover:border-[#D4AF37]/60 rounded-2xl p-4 flex flex-col justify-between transition-all hover:shadow-xl group"
+                    key={p.id}
+                    className="relative bg-[#16161D] border border-white/10 rounded-2xl overflow-hidden flex flex-col group hover:border-[#D4AF37] transition-all shadow-md"
                   >
-                    <div>
-                      <div className="flex items-start justify-between gap-2 mb-2">
-                        <h4 className="font-semibold text-base text-[#FFF8E7] truncate group-hover:text-[#D4AF37] transition-colors">
-                          {proj.name}
-                        </h4>
+                    {/* Project Card Header: Folder icon on left, 3-bar menu on right */}
+                    <div className="p-2.5 flex items-center justify-between bg-black/40 z-10">
+                      <Folder className="w-4 h-4 text-[#D4AF37]" />
+                      <div className="relative">
                         <button
-                          onClick={() => setProjectToDelete(proj)}
-                          className="p-1.5 text-[#FFF8E7]/40 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors min-h-[36px] min-w-[36px] flex items-center justify-center"
-                          title="Delete Project"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setActiveMenuProjectId(isMenuOpen ? null : p.id);
+                          }}
+                          className="p-1 hover:text-[#D4AF37] text-white/70 rounded transition-colors"
+                          title="Project actions"
                         >
-                          <Trash2 className="w-4 h-4" />
+                          <Menu className="w-4 h-4" />
                         </button>
-                      </div>
 
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-[#FFF8E7]/60 mb-4">
-                        <span className="flex items-center gap-1 font-mono">
-                          <Layers className="w-3.5 h-3.5 text-[#D4AF37]" />
-                          {designCount} {designCount === 1 ? 'design' : 'designs'}
-                        </span>
-                        <span>·</span>
-                        <span className="font-mono text-[#D4AF37]/90 font-medium">
-                          {formatBytes(projSize)}
-                        </span>
-                        <span>·</span>
-                        <span className="flex items-center gap-1">
-                          <Clock className="w-3 h-3 text-[#FFF8E7]/40" />
-                          {formattedDate}
-                        </span>
+                        {/* 3-Bar Dropdown Menu: Exactly 4 options */}
+                        {isMenuOpen && (
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            className="absolute right-0 top-7 z-30 w-44 bg-[#1E1E26] border border-[#D4AF37]/40 rounded-xl shadow-2xl py-1 text-xs text-[#FFF8E7]"
+                          >
+                            <button
+                              onClick={() => {
+                                setActiveMenuProjectId(null);
+                                onOpenProject(p.id);
+                              }}
+                              className="w-full text-left px-3 py-2 hover:bg-[#2A2A36] flex items-center gap-2"
+                            >
+                              <Edit className="w-3.5 h-3.5 text-[#D4AF37]" />
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => {
+                                setActiveMenuProjectId(null);
+                                onOpenProject(p.id);
+                              }}
+                              className="w-full text-left px-3 py-2 hover:bg-[#2A2A36] flex items-center gap-2"
+                            >
+                              <Download className="w-3.5 h-3.5 text-blue-400" />
+                              Download
+                            </button>
+                            <button
+                              onClick={() => handleSaveProjectAsTemplate(p)}
+                              className="w-full text-left px-3 py-2 hover:bg-[#2A2A36] flex items-center gap-2"
+                            >
+                              <BookmarkPlus className="w-3.5 h-3.5 text-emerald-400" />
+                              Save as Template
+                            </button>
+                            <div className="h-px bg-white/10 my-1" />
+                            <button
+                              onClick={() => {
+                                setActiveMenuProjectId(null);
+                                setProjectToDelete(p);
+                              }}
+                              className="w-full text-left px-3 py-2 text-red-400 hover:bg-red-950/40 flex items-center gap-2"
+                            >
+                              <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                              Delete
+                            </button>
+                          </div>
+                        )}
                       </div>
                     </div>
 
-                    <button
-                      onClick={() => onOpenProject(proj.id)}
-                      className="w-full bg-[#21212A] hover:bg-[#D4AF37] hover:text-[#0B0B0F] text-[#FFF8E7] text-xs font-bold py-2.5 px-4 rounded-xl flex items-center justify-center gap-2 transition-all min-h-[44px]"
+                    {/* Preview Thumbnail Area */}
+                    <div
+                      onClick={() => onOpenProject(p.id)}
+                      className="cursor-pointer aspect-[3/4] bg-black/60 flex items-center justify-center overflow-hidden relative"
                     >
-                      <FolderOpen className="w-4 h-4" />
-                      <span>Open Workspace</span>
-                    </button>
+                      {thumb ? (
+                        <img
+                          src={thumb}
+                          alt={p.name}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                        />
+                      ) : (
+                        <div className="text-center p-2 text-white/30 text-[10px]">
+                          No preview
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Project Title underneath */}
+                    <div
+                      onClick={() => onOpenProject(p.id)}
+                      className="p-2.5 text-center cursor-pointer bg-black/50"
+                    >
+                      <h4 className="text-xs font-semibold text-white truncate" title={p.name}>
+                        {p.name}
+                      </h4>
+                      <p className="text-[10px] text-white/50 mt-0.5">
+                        {p.pages.length} design{p.pages.length === 1 ? '' : 's'}
+                      </p>
+                    </div>
                   </div>
                 );
               })}
             </div>
           )}
+        </section>
+
+        {/* 4. STORAGE SECTION (IMG_1495 (2).pdf Page 1) */}
+        <section className="bg-black/90 backdrop-blur-md rounded-3xl p-5 text-white shadow-xl flex flex-col gap-3">
+          <div className="bg-[#B88E18]/80 text-white font-bold text-sm px-4 py-1.5 rounded-2xl w-fit shadow-sm">
+            Storage
+          </div>
+
+          <div className="flex items-center justify-between text-xs sm:text-sm font-bold pt-1">
+            <div>
+              <span className="text-white/80 font-normal">Used: </span>
+              <span className="text-red-500 font-mono text-sm sm:text-base">
+                {storageBreakdown.totalBytes > 0
+                  ? formatBytes(storageBreakdown.totalBytes)
+                  : '250MB'}
+              </span>
+            </div>
+            <div>
+              <span className="text-white/80 font-normal">Available: </span>
+              <span className="text-emerald-400 font-mono text-sm sm:text-base">
+                {formatBytes(Math.max(0, storageEstimate.quotaBytes - storageBreakdown.totalBytes))}
+              </span>
+            </div>
+          </div>
+
+          {/* Progress Bar with Yellow / Green Indicator */}
+          <div className="w-full h-3 bg-[#1C1C24] rounded-full overflow-hidden border border-white/10 p-0.5">
+            <div
+              className="h-full bg-gradient-to-r from-yellow-500 to-emerald-400 rounded-full transition-all duration-500"
+              style={{
+                width: `${Math.max(5, Math.min(100, (storageBreakdown.totalBytes / (storageEstimate.quotaBytes || 1073741824)) * 100))}%`,
+              }}
+            />
+          </div>
+
+          <p className="text-[10px] text-white/50 text-center leading-tight pt-1">
+            Illustrative storage values and images for project previews not actual measurements
+          </p>
+        </section>
+
+        {/* Carousel Dots at Bottom of Screen (Page 1) */}
+        <div className="flex items-center justify-center gap-1.5 pt-2 pb-4">
+          <span className="w-2 h-2 rounded-full bg-black" />
+          <span className="w-2 h-2 rounded-full bg-black/40" />
+          <span className="w-2 h-2 rounded-full bg-black/40" />
+          <span className="w-2 h-2 rounded-full bg-black/40" />
         </div>
       </main>
 
-      {/* Delete Single Project Confirmation Modal */}
+      {/* Delete Confirmation Modal */}
       {projectToDelete && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-[#17171C] border border-[#333342] rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="w-full max-w-sm bg-[#121217] border border-red-500/50 rounded-3xl p-6 shadow-2xl text-[#FFF8E7] flex flex-col gap-4">
             <div className="flex items-center gap-3 text-red-400">
-              <AlertCircle className="w-6 h-6 shrink-0" />
-              <h3 className="text-base font-bold text-[#FFF8E7]">Delete Project?</h3>
+              <AlertTriangle className="w-6 h-6" />
+              <h3 className="font-bold text-base">Delete Project?</h3>
             </div>
-            <p className="text-xs text-[#FFF8E7]/70 leading-relaxed">
-              Are you sure you want to delete <span className="text-[#FFF8E7] font-semibold">"{projectToDelete.name}"</span>? All background images and designs will be permanently removed to free up storage space.
+            <p className="text-xs text-[#FFF8E7]/70">
+              Are you sure you want to delete <span className="font-semibold text-white">"{projectToDelete.name}"</span>?
+              All associated background images and design data will be permanently wiped from browser storage.
             </p>
             <div className="flex items-center justify-end gap-2 pt-2">
               <button
                 onClick={() => setProjectToDelete(null)}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-[#FFF8E7]/70 hover:bg-[#212128] transition-colors min-h-[44px]"
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-white/60 hover:text-white"
               >
                 Cancel
               </button>
               <button
                 onClick={handleConfirmDelete}
-                className="px-4 py-2 rounded-xl text-xs font-bold bg-red-500 hover:bg-red-600 text-white shadow-lg shadow-red-500/20 transition-all min-h-[44px]"
+                className="bg-red-600 hover:bg-red-500 text-white font-bold text-xs px-4 py-2 rounded-xl transition-all shadow-lg shadow-red-600/30"
               >
-                Delete & Free Space
+                Confirm Delete
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Erase Everything - Confirmation Step 1 */}
-      {eraseStep === 1 && (
-        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-[#17171C] border border-red-500/40 rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
-            <div className="flex items-center gap-3 text-red-400">
-              <AlertTriangle className="w-6 h-6 shrink-0" />
-              <h3 className="text-base font-bold text-[#FFF8E7]">Erase All Application Data?</h3>
-            </div>
-            <p className="text-xs text-[#FFF8E7]/70 leading-relaxed">
-              This will permanently wipe all projects, background image files, custom fonts, and offline cache storage from this browser. This cannot be undone.
-            </p>
-            <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-xs text-red-300">
-              Are you sure you want to proceed to the final confirmation?
-            </div>
-            <div className="flex items-center justify-end gap-2 pt-2">
-              <button
-                onClick={() => setEraseStep(0)}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-[#FFF8E7]/70 hover:bg-[#212128] transition-colors min-h-[44px]"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => setEraseStep(2)}
-                className="px-4 py-2 rounded-xl text-xs font-bold bg-red-500 hover:bg-red-600 text-white shadow-lg shadow-red-500/20 transition-all min-h-[44px]"
-              >
-                Continue to Final Wipe
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Document Workflow Multi-Step Modal */}
+      <DocxWorkflowModal
+        isOpen={isDocxModalOpen}
+        onClose={() => setIsDocxModalOpen(false)}
+        onProjectCreated={(id) => onOpenProject(id)}
+      />
 
-      {/* Erase Everything - Final Confirmation Step 2 */}
-      {eraseStep === 2 && (
-        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-[#17171C] border-2 border-red-500 rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
-            <div className="flex items-center gap-3 text-red-400">
-              <ShieldAlert className="w-7 h-7 shrink-0 animate-pulse text-red-500" />
-              <div>
-                <h3 className="text-base font-bold text-red-400">Final Confirmation: Absolute Wipe</h3>
-                <p className="text-[11px] text-[#FFF8E7]/60">Action is non-recoverable</p>
-              </div>
+      {/* Spreadsheet Workflow: Template Selector Dialog */}
+      {isTemplateSelectorOpen && pendingSheetData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-[#121217] border border-[#D4AF37] rounded-3xl p-6 shadow-2xl text-[#FFF8E7] flex flex-col gap-4">
+            <div className="flex items-center justify-between border-b border-[#262632] pb-3">
+              <h3 className="font-bold text-base text-[#FFF8E7]">
+                Select Template for Spreadsheet
+              </h3>
+              <button
+                onClick={() => setIsTemplateSelectorOpen(false)}
+                className="text-white/50 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
-            <p className="text-xs text-[#FFF8E7]/80 leading-relaxed">
-              Confirming will immediately clear IndexedDB, purge cache storage, revoke all active blobs, and reload the application into a fresh zero-byte state.
+
+            <p className="text-xs text-[#FFF8E7]/60">
+              "{pendingSheetData.filename}" contains {pendingSheetData.rows.length} row(s) and columns:{' '}
+              <span className="text-[#D4AF37]">{pendingSheetData.headers.join(', ')}</span>.
             </p>
-            <div className="flex items-center justify-end gap-2 pt-3">
+
+            <div className="space-y-2 max-h-60 overflow-y-auto">
               <button
-                onClick={() => setEraseStep(0)}
-                disabled={isErasing}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-[#FFF8E7]/70 hover:bg-[#212128] transition-colors min-h-[44px]"
+                onClick={() => handleApplyTemplateToSpreadsheet(undefined)}
+                className="w-full text-left p-3 rounded-2xl bg-[#1C1C24] hover:bg-[#262632] border border-white/10 hover:border-[#D4AF37] transition-all flex items-center justify-between"
               >
-                Cancel
+                <div>
+                  <div className="text-xs font-bold text-white">
+                    Plain-White Clean Document
+                  </div>
+                  <div className="text-[10px] text-white/50">
+                    Auto-creates text boxes on high-resolution white pages
+                  </div>
+                </div>
+                <span className="text-xs text-[#D4AF37]">Select</span>
               </button>
-              <button
-                onClick={handlePerformEraseEverything}
-                disabled={isErasing}
-                className="px-5 py-2.5 rounded-xl text-xs font-bold bg-red-600 hover:bg-red-700 text-white shadow-xl shadow-red-600/30 transition-all min-h-[44px] flex items-center gap-2"
-              >
-                {isErasing ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>Wiping Storage…</span>
-                  </>
-                ) : (
-                  <span>Yes, Permanently Erase Everything</span>
-                )}
-              </button>
+
+              {savedTemplatesList.map((tpl) => (
+                <button
+                  key={tpl.id}
+                  onClick={() => handleApplyTemplateToSpreadsheet(tpl)}
+                  className="w-full text-left p-3 rounded-2xl bg-[#1C1C24] hover:bg-[#262632] border border-white/10 hover:border-[#D4AF37] transition-all flex items-center justify-between"
+                >
+                  <div>
+                    <div className="text-xs font-bold text-white">{tpl.name}</div>
+                    <div className="text-[10px] text-white/50">
+                      {tpl.template.length} placeholder fields
+                    </div>
+                  </div>
+                  <span className="text-xs text-[#D4AF37]">Select</span>
+                </button>
+              ))}
             </div>
           </div>
         </div>

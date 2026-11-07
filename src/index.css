@@ -18,7 +18,24 @@
     font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
     -webkit-tap-highlight-color: transparent;
     touch-action: manipulation;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
+}
+
+/* Hardware Acceleration & Sub-pixel Antialiasing across Litdom Batch Studio */
+.workspace-canvas,
+.canvas-element,
+.text-element,
+.crisp-render,
+canvas {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  image-rendering: -webkit-optimize-contrast;
 }
 
 /* Custom scrollbar for mobile / desktop */

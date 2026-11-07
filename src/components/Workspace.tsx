@@ -8,6 +8,9 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   ArrowLeft,
+  Home,
+  Menu,
+  Share2,
   FileSpreadsheet,
   Download,
   ChevronLeft,
@@ -20,6 +23,7 @@ import {
   Palette,
   Bold,
   Italic,
+  Underline,
   AlignLeft,
   AlignCenter,
   AlignRight,
@@ -33,9 +37,15 @@ import {
   Redo2,
   CheckSquare,
   Square,
+  Edit2,
   Edit3,
   AlertTriangle,
   Grid,
+  RefreshCw,
+  SlidersHorizontal,
+  X,
+  Image as ImageIcon,
+  Feather,
 } from 'lucide-react';
 import {
   Project,
@@ -66,6 +76,10 @@ import { SpreadsheetSheet } from './SpreadsheetSheet';
 import { DownloadSheet } from './DownloadSheet';
 import { FontManagerModal } from './FontManagerModal';
 import { RichTextOverlay } from './RichTextOverlay';
+import { SyncLayoutModal } from './SyncLayoutModal';
+import { AddPanelModal } from './AddPanelModal';
+import { MoreMenuDrawer } from './MoreMenuDrawer';
+import { SocialShareModal } from './SocialShareModal';
 
 type CanvasHandleType = 'move' | 'nw' | 'ne' | 'se' | 'sw' | 'e' | 'w';
 
@@ -113,6 +127,16 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   const [isSpreadsheetOpen, setIsSpreadsheetOpen] = useState(false);
   const [isDownloadOpen, setIsDownloadOpen] = useState(false);
   const [isFontManagerOpen, setIsFontManagerOpen] = useState(false);
+  const [isSyncLayoutOpen, setIsSyncLayoutOpen] = useState(false);
+  const [isAddPanelOpen, setIsAddPanelOpen] = useState(false);
+  const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
+  const [isSocialShareOpen, setIsSocialShareOpen] = useState(false);
+  const [showTopThumbnails, setShowTopThumbnails] = useState(false);
+  const [activeSelectedTool, setActiveSelectedTool] = useState<
+    'styles' | 'font' | 'size' | 'color' | 'effects' | 'format' | null
+  >(null);
+  const [isUploadMenuOpen, setIsUploadMenuOpen] = useState(false);
+  const [isRightPanelOpen, setIsRightPanelOpen] = useState(false);
 
   // Installed Custom Fonts
   const [installedFonts, setInstalledFonts] = useState<StoredFontRecord[]>([]);
@@ -159,7 +183,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   const [isSnapToGrid, setIsSnapToGrid] = useState(false);
 
   const selectedBox: TextBoxTemplate | undefined =
-    activeBoxes.find((b) => b.id === selectedBoxId) || activeBoxes[0];
+    selectedBoxId ? activeBoxes.find((b) => b.id === selectedBoxId) : undefined;
 
   // Helper to push history snapshot before mutations
   const recordHistory = useCallback((projToSave: Project) => {
@@ -223,10 +247,10 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
   // Keep selectedBoxId valid when active page changes
   useEffect(() => {
-    if (!selectedBox && activeBoxes.length > 0) {
-      setSelectedBoxId(activeBoxes[0].id);
+    if (selectedBoxId && !activeBoxes.some((b) => b.id === selectedBoxId)) {
+      setSelectedBoxId(null);
     }
-  }, [activeBoxes, selectedBox]);
+  }, [activeBoxes, selectedBoxId]);
 
   // Page Switch Handler: Immediately clears current image to avoid showing stale background
   const handleSelectPage = useCallback(
@@ -384,9 +408,9 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       return;
     }
 
-    const containerWidth = canvasContainerRef.current.clientWidth || 600;
+    const containerWidth = Math.round(canvasContainerRef.current.clientWidth || 600);
     const aspect = (activePage.width || 1000) / (activePage.height || 1000);
-    const targetW = Math.min(containerWidth, activePage.width || 1000);
+    const targetW = Math.round(Math.min(containerWidth, activePage.width || 1000));
     const targetH = Math.round(targetW / aspect);
 
     renderDesignToCanvas(
@@ -675,6 +699,149 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     triggerAutoSave(updatedProj);
   };
 
+  const handleAddNewFieldWithConfig = (
+    fieldName: string,
+    config: Partial<TextBoxTemplate>
+  ) => {
+    recordHistory(project);
+    const cleanLabel = `${fieldName} ${activeBoxes.length + 1}`;
+    const newBox: TextBoxTemplate = {
+      id: `tpl_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      fieldLabel: cleanLabel,
+      x: 15,
+      y: Math.min(80, 20 + activeBoxes.length * 10),
+      width: 70,
+      fontFamily: 'Plus Jakarta Sans',
+      fontSize: 24,
+      fontWeight: '500',
+      fontStyle: 'normal',
+      textAlign: 'center',
+      color: '#FFF8E7',
+      lineHeight: 1.3,
+      letterSpacing: 0,
+      ...config,
+    };
+
+    const updatedTemplate = [...project.template, newBox];
+    const updatedPages = project.pages.map((p) => {
+      const pBoxes = p.textBoxes && p.textBoxes.length > 0 ? p.textBoxes : project.template;
+      return {
+        ...p,
+        textBoxes: [...pBoxes, JSON.parse(JSON.stringify(newBox))],
+      };
+    });
+
+    const updatedProj: Project = {
+      ...project,
+      template: updatedTemplate,
+      pages: updatedPages,
+      updatedAt: Date.now(),
+    };
+    onUpdateProject(updatedProj);
+    setSelectedBoxId(newBox.id);
+    triggerAutoSave(updatedProj);
+  };
+
+  const handleAddFromPanel = (type?: 'heading' | 'subheading' | 'body' | 'page_number' | 'table' | 'line') => {
+    if (type === 'heading') {
+      handleAddNewFieldWithConfig('Heading', { fontSize: 36, fontWeight: '700', textAlign: 'center' });
+    } else if (type === 'subheading') {
+      handleAddNewFieldWithConfig('Subheading', { fontSize: 24, fontWeight: '600', textAlign: 'center' });
+    } else if (type === 'body') {
+      handleAddNewFieldWithConfig('Body Text', { fontSize: 16, fontWeight: '400', textAlign: 'left' });
+    } else if (type === 'page_number') {
+      handleAddNewFieldWithConfig('Page Number', { fontSize: 14, fontWeight: '600', textAlign: 'center' });
+    } else if (type === 'line') {
+      handleAddNewFieldWithConfig('Divider', { fontSize: 14, fontWeight: '400', textAlign: 'center' });
+    } else {
+      handleAddNewField();
+    }
+  };
+
+  const handleApplyFontCombination = (headingFont: string, bodyFont: string) => {
+    recordHistory(project);
+    const updatedBoxes = activeBoxes.map((box, idx) => {
+      if (idx === 0) {
+        return { ...box, fontFamily: headingFont, fontWeight: '700' as const };
+      } else {
+        return { ...box, fontFamily: bodyFont, fontWeight: '400' as const };
+      }
+    });
+
+    if (styleScope === 'this') {
+      const updatedPages = project.pages.map((p, idx) =>
+        idx === activePageIndex ? { ...p, textBoxes: updatedBoxes } : p
+      );
+      const updatedProj: Project = { ...project, pages: updatedPages, updatedAt: Date.now() };
+      onUpdateProject(updatedProj);
+      triggerAutoSave(updatedProj);
+    } else {
+      const updatedTemplate = updatedBoxes;
+      const updatedPages = project.pages.map((p) => ({
+        ...p,
+        textBoxes: JSON.parse(JSON.stringify(updatedBoxes)),
+      }));
+      const updatedProj: Project = {
+        ...project,
+        template: updatedTemplate,
+        pages: updatedPages,
+        updatedAt: Date.now(),
+      };
+      onUpdateProject(updatedProj);
+      triggerAutoSave(updatedProj);
+    }
+    showToast(`Applied ${headingFont} + ${bodyFont}`);
+  };
+
+  const handleSyncAllPages = () => {
+    handleCopyLayoutToAllDesigns();
+  };
+
+  const handleSyncCustomPages = (pageIndices: number[]) => {
+    if (!activePage) return;
+    recordHistory(project);
+    const currentBoxes = activeBoxes;
+    const updatedPages = project.pages.map((p, idx) => {
+      if (pageIndices.includes(idx)) {
+        return {
+          ...p,
+          textBoxes: JSON.parse(JSON.stringify(currentBoxes)),
+        };
+      }
+      return p;
+    });
+    const updatedProj: Project = {
+      ...project,
+      pages: updatedPages,
+      updatedAt: Date.now(),
+    };
+    onUpdateProject(updatedProj);
+    triggerAutoSave(updatedProj);
+    showToast(`Layout synced to ${pageIndices.length} page(s)`);
+  };
+
+  const handleSyncFieldToPages = (fieldLabel: string, targetPageIndices: number[]) => {
+    const sourceBox = activeBoxes.find((b) => b.fieldLabel === fieldLabel);
+    if (!sourceBox) return;
+    recordHistory(project);
+    const updatedPages = project.pages.map((p, idx) => {
+      if (targetPageIndices.includes(idx)) {
+        const pBoxes = p.textBoxes && p.textBoxes.length > 0 ? p.textBoxes : project.template;
+        const updated = pBoxes.map((b) => (b.fieldLabel === fieldLabel ? { ...b, ...sourceBox } : b));
+        return { ...p, textBoxes: updated };
+      }
+      return p;
+    });
+    const updatedProj: Project = {
+      ...project,
+      pages: updatedPages,
+      updatedAt: Date.now(),
+    };
+    onUpdateProject(updatedProj);
+    triggerAutoSave(updatedProj);
+    showToast(`Field "${fieldLabel}" synced`);
+  };
+
   // Delete Field
   const handleDeleteField = (boxId: string) => {
     if (activeBoxes.length <= 1) {
@@ -822,8 +989,8 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!canvasRef.current || !activePage) return;
     const rect = canvasRef.current.getBoundingClientRect();
-    const mousePxX = e.clientX - rect.left;
-    const mousePxY = e.clientY - rect.top;
+    const mousePxX = Math.round(e.clientX - rect.left);
+    const mousePxY = Math.round(e.clientY - rect.top);
 
     const ctx = canvasRef.current.getContext('2d');
     if (!ctx) return;
@@ -913,6 +1080,10 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         return;
       }
     }
+
+    // 3. Tapped outside all text boxes: deselect to reveal unselected State A dock
+    setSelectedBoxId(null);
+    setActiveSelectedTool(null);
   };
 
   const handleCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -966,16 +1137,6 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
   const handleCanvasPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (activeHandle) {
-      if (
-        activeHandle === 'move' &&
-        dragStart &&
-        Math.abs(e.clientX - dragStart.mouseX) < 5 &&
-        Math.abs(e.clientY - dragStart.mouseY) < 5 &&
-        selectedBoxId
-      ) {
-        // Tapped on the text box without dragging -> Open in-place text editor!
-        setEditingRichBoxId(selectedBoxId);
-      }
       setActiveHandle(null);
       setDragStart(null);
       try {
@@ -1003,72 +1164,44 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     const canvasLeft = canvasRect.left - containerRect.left;
     const canvasTop = canvasRect.top - containerRect.top;
 
+    const boxX = Math.round(canvasLeft + layout.boxX);
+    const boxY = Math.round(canvasTop + layout.boxY);
+    const boxW = Math.round(layout.boxW);
+    const boxH = Math.round(layout.computedHeightPx);
+
     return {
       box: targetBox,
       scale: canvasRect.width / 1000,
-      boxX: canvasLeft + layout.boxX,
-      boxY: canvasTop + layout.boxY,
-      boxW: layout.boxW,
-      boxH: layout.computedHeightPx,
-      containerWidth: containerRect.width,
-      containerHeight: containerRect.height,
+      boxX,
+      boxY,
+      boxW,
+      boxH,
+      containerWidth: Math.round(containerRect.width),
+      containerHeight: Math.round(containerRect.height),
     };
   };
 
   const editingLayout = getEditingBoxLayout();
 
   return (
-    <div className="h-[100dvh] bg-[#0B0B0F] text-[#FFF8E7] flex flex-col font-sans select-none overflow-hidden overscroll-none">
-      {/* 1. TOP APP BAR */}
-      <header className="border-b border-[#212128] bg-[#121217]/95 backdrop-blur-md shrink-0 z-30 px-3 sm:px-6 py-2.5 flex items-center justify-between gap-3">
-        {/* Left: Back & Project Title */}
-        <div className="flex items-center gap-2.5 min-w-0">
+    <div className="h-[100dvh] bg-[#E5B224] text-black flex flex-col font-sans select-none overflow-hidden overscroll-none relative">
+      {/* 1. TOP APP BAR (Exact match to IMG_1495 (2).pdf Pages 2-5) */}
+      <header className="border-b border-[#212128] bg-[#0B0B0F] text-white shrink-0 z-30 px-3 sm:px-6 py-2.5 flex items-center justify-between gap-3 shadow-md">
+        {/* Left: Circular Home Button & In-Memory Undo / Redo */}
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           <button
             onClick={onBackToDashboard}
-            className="p-2 rounded-xl text-[#FFF8E7]/70 hover:text-white hover:bg-[#212128] transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center"
+            className="w-10 h-10 rounded-full bg-black border border-white/20 text-white flex items-center justify-center hover:bg-neutral-800 active:scale-95 shadow-md shrink-0 transition-transform"
             title="Back to Dashboard"
           >
-            <ArrowLeft className="w-5 h-5" />
+            <Home className="w-5 h-5 text-white" />
           </button>
-          <div className="min-w-0">
-            <input
-              type="text"
-              value={project.name}
-              onChange={(e) => {
-                const updated = { ...project, name: e.target.value };
-                onUpdateProject(updated);
-                triggerAutoSave(updated);
-              }}
-              className="bg-transparent font-serif font-bold text-sm sm:text-base text-[#FFF8E7] focus:outline-none focus:border-b focus:border-[#D4AF37] truncate max-w-[140px] sm:max-w-xs"
-            />
-            <div className="flex items-center gap-1.5 text-[10px]">
-              <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  saveStatus === 'saved'
-                    ? 'bg-emerald-400'
-                    : saveStatus === 'saving'
-                    ? 'bg-amber-400 animate-pulse'
-                    : 'bg-red-400'
-                }`}
-              />
-              <span className="text-[#FFF8E7]/50 capitalize">
-                {saveStatus === 'saved'
-                  ? 'Saved'
-                  : saveStatus === 'saving'
-                  ? 'Saving…'
-                  : 'Not saved'}
-              </span>
-            </div>
-          </div>
-        </div>
 
-        {/* Center: In-Memory Undo / Redo & Snap-to-Grid */}
-        <div className="flex items-center gap-1.5">
           <div className="flex items-center gap-1 bg-[#17171C] border border-[#2D2D38] p-1 rounded-xl">
             <button
               onClick={handleUndo}
               disabled={undoStack.length === 0}
-              className="p-1.5 rounded-lg text-[#FFF8E7]/70 hover:text-white hover:bg-[#262632] disabled:opacity-30 transition-all min-h-[36px] min-w-[36px] flex items-center justify-center"
+              className="p-1.5 rounded-lg text-white/70 hover:text-white hover:bg-[#262632] disabled:opacity-30 transition-all min-h-[32px] min-w-[32px] flex items-center justify-center"
               title="Undo (Ctrl+Z)"
             >
               <Undo2 className="w-4 h-4" />
@@ -1076,55 +1209,140 @@ export const Workspace: React.FC<WorkspaceProps> = ({
             <button
               onClick={handleRedo}
               disabled={redoStack.length === 0}
-              className="p-1.5 rounded-lg text-[#FFF8E7]/70 hover:text-white hover:bg-[#262632] disabled:opacity-30 transition-all min-h-[36px] min-w-[36px] flex items-center justify-center"
+              className="p-1.5 rounded-lg text-white/70 hover:text-white hover:bg-[#262632] disabled:opacity-30 transition-all min-h-[32px] min-w-[32px] flex items-center justify-center"
               title="Redo (Ctrl+Y)"
             >
               <Redo2 className="w-4 h-4" />
             </button>
           </div>
-
-          <button
-            onClick={() => setIsSnapToGrid(!isSnapToGrid)}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-xs font-medium transition-all min-h-[36px] ${
-              isSnapToGrid
-                ? 'bg-[#D4AF37]/20 border-[#D4AF37] text-[#D4AF37] font-semibold'
-                : 'bg-[#17171C] border-[#2D2D38] text-[#FFF8E7]/60 hover:text-white hover:bg-[#262632]'
-            }`}
-            title="Snap to Grid (2.5% increment alignment)"
-          >
-            <Grid className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Snap</span>
-          </button>
         </div>
 
-        {/* Right: Spreadsheet & Download Triggers */}
-        <div className="flex items-center gap-2 shrink-0">
+        {/* Center: Pagination & Project Title */}
+        <div className="flex items-center gap-2">
+          {project.pages.length > 0 && (
+            <div className="flex items-center gap-1.5 bg-black/60 border border-white/10 px-3 py-1 rounded-full">
+              <button
+                onClick={() => handleSelectPage(Math.max(0, activePageIndex - 1))}
+                disabled={activePageIndex === 0}
+                className="text-white/70 hover:text-white disabled:opacity-30 p-0.5"
+                title="Previous Design"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+
+              <span className="text-xs font-mono font-bold text-[#E5B224] tracking-wide">
+                Design {activePageIndex + 1} of {project.pages.length}
+              </span>
+
+              <button
+                onClick={() =>
+                  handleSelectPage(
+                    Math.min(project.pages.length - 1, activePageIndex + 1)
+                  )
+                }
+                disabled={activePageIndex === project.pages.length - 1}
+                className="text-white/70 hover:text-white disabled:opacity-30 p-0.5"
+                title="Next Design"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Right: Designs (3-bar strip toggle), Download, Share */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          {/* Top 3-Bar Strip Toggle (Page 18) */}
           <button
-            onClick={() => setIsSpreadsheetOpen(true)}
-            className="bg-[#1C1C24] hover:bg-[#262632] border border-[#333342] text-[#D4AF37] text-xs font-semibold px-3 py-2 rounded-xl flex items-center gap-1.5 transition-all min-h-[44px]"
+            onClick={() => setShowTopThumbnails(!showTopThumbnails)}
+            className={`p-2 sm:px-3 sm:py-2 rounded-xl border flex items-center gap-1.5 transition-all min-h-[40px] shadow-sm ${
+              showTopThumbnails
+                ? 'bg-[#E5B224] text-black border-[#E5B224] font-bold'
+                : 'bg-[#1C1C24] border-[#333342] text-white hover:bg-[#262632]'
+            }`}
+            title="Toggle All Designs Thumbnail Strip"
           >
-            <FileSpreadsheet className="w-4 h-4" />
-            <span className="hidden sm:inline">Spreadsheet</span>
+            <Menu className="w-4 h-4" />
+            <span className="hidden sm:inline text-xs font-semibold">Designs</span>
           </button>
 
+          {/* Download Button */}
           <button
             onClick={() => {
-              if (editingRichBoxId) {
-                setEditingRichBoxId(null);
-              }
+              if (editingRichBoxId) setEditingRichBoxId(null);
               setIsDownloadOpen(true);
             }}
-            className="bg-gradient-to-r from-[#D4AF37] to-[#F4D58D] text-[#0B0B0F] text-xs font-bold px-3.5 py-2 rounded-xl flex items-center gap-1.5 shadow-md shadow-[#D4AF37]/20 transition-all min-h-[44px]"
+            className="p-2 sm:px-3 sm:py-2 rounded-xl bg-gradient-to-r from-[#D4AF37] to-[#F4D58D] text-black text-xs font-bold flex items-center gap-1.5 shadow-md shadow-[#D4AF37]/20 transition-all active:scale-95 min-h-[40px]"
+            title="Download Designs"
           >
             <Download className="w-4 h-4" />
             <span className="hidden sm:inline">Download</span>
           </button>
+
+          {/* Share Button (Page 10) */}
+          <button
+            onClick={() => setIsSocialShareOpen(true)}
+            className="p-2 sm:px-3 sm:py-2 rounded-xl bg-[#1C1C24] hover:bg-[#262632] border border-[#333342] text-[#D4AF37] text-xs font-bold flex items-center gap-1.5 shadow-md transition-all active:scale-95 min-h-[40px]"
+            title="Upload Directly to Social Media"
+          >
+            <Share2 className="w-4 h-4" />
+            <span className="hidden sm:inline">Share</span>
+          </button>
         </div>
       </header>
 
+      {/* 2. TOP HORIZONTAL THUMBNAIL STRIP (Exact match to IMG_1495 (2).pdf Page 18) */}
+      {showTopThumbnails && (
+        <div className="bg-[#0B0B0F]/95 backdrop-blur-md border-b border-[#262632] px-4 py-2 flex items-center gap-2.5 overflow-x-auto z-20 shadow-xl shrink-0 animate-in slide-in-from-top-2">
+          {project.pages.map((page, idx) => {
+            const isActive = idx === activePageIndex;
+            const thumbUrl = thumbnailUrls[page.id];
+
+            return (
+              <button
+                key={page.id}
+                onClick={() => handleSelectPage(idx)}
+                className={`relative shrink-0 rounded-xl overflow-hidden border-2 cursor-pointer transition-all flex flex-col items-center justify-center p-0.5 ${
+                  isActive
+                    ? 'border-[#E5B224] ring-2 ring-[#E5B224]/50 scale-105'
+                    : 'border-[#333342] opacity-75 hover:opacity-100'
+                }`}
+                style={{ width: '62px', height: '62px' }}
+                title={`Design ${idx + 1}`}
+              >
+                {thumbUrl ? (
+                  <img
+                    src={thumbUrl}
+                    alt={page.name}
+                    className="w-full h-full object-cover rounded-lg"
+                    loading="lazy"
+                  />
+                ) : (
+                  <div className="w-full h-full bg-[#1A1A24] flex items-center justify-center text-[10px] text-white/50 rounded-lg">
+                    #{idx + 1}
+                  </div>
+                )}
+                <span className="absolute bottom-0.5 right-1 text-[9px] font-mono font-bold bg-black/80 px-1 rounded text-white">
+                  {idx + 1}
+                </span>
+              </button>
+            );
+          })}
+
+          <button
+            onClick={() => batchUploadRef.current?.click()}
+            className="shrink-0 w-15 h-15 rounded-xl border-2 border-dashed border-[#D4AF37]/50 hover:border-[#D4AF37] bg-[#121217] text-[#D4AF37] flex flex-col items-center justify-center gap-1 transition-all"
+            title="Upload more backgrounds"
+          >
+            <Plus className="w-4 h-4" />
+            <span className="text-[9px] font-bold">Add</span>
+          </button>
+        </div>
+      )}
+
       {/* Toast Notification */}
       {toastMessage && (
-        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 bg-[#D4AF37] text-[#0B0B0F] text-xs font-bold px-4 py-2 rounded-full shadow-2xl animate-in fade-in slide-in-from-top-2">
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 bg-[#0B0B0F] text-[#E5B224] border border-[#E5B224] text-xs font-bold px-4 py-2 rounded-full shadow-2xl animate-in fade-in slide-in-from-top-2">
           {toastMessage}
         </div>
       )}
@@ -1170,7 +1388,8 @@ export const Workspace: React.FC<WorkspaceProps> = ({
           {/* Interactive Canvas Container with Auto-Height Box Layout */}
           <div
             ref={canvasContainerRef}
-            className="w-full max-w-lg bg-[#121217] border border-[#262632] rounded-2xl overflow-hidden shadow-2xl relative flex items-center justify-center min-h-[320px]"
+            style={{ transform: 'translateZ(0)', backfaceVisibility: 'hidden' }}
+            className="w-full max-w-lg bg-[#121217] border border-[#262632] rounded-2xl overflow-hidden shadow-2xl relative flex items-center justify-center min-h-[320px] crisp-render"
           >
             {project.pages.length === 0 ? (
               <div className="p-8 text-center space-y-3">
@@ -1189,7 +1408,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                 </button>
               </div>
             ) : (
-              <div className="relative w-full flex items-center justify-center">
+              <div className="relative w-full flex items-center justify-center crisp-render" style={{ transform: 'translateZ(0)' }}>
                 {(!currentImageData || currentImageData.imageId !== activePage?.imageId) && (
                   <div className="absolute inset-0 bg-[#121217] flex flex-col items-center justify-center gap-2 z-10 rounded-xl">
                     <div className="w-6 h-6 border-2 border-[#D4AF37] border-t-transparent rounded-full animate-spin" />
@@ -1203,8 +1422,15 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                   onPointerDown={handleCanvasPointerDown}
                   onPointerMove={handleCanvasPointerMove}
                   onPointerUp={handleCanvasPointerUp}
-                  style={{ touchAction: activeHandle ? 'none' : 'pan-y pinch-zoom' }}
-                  className="cursor-move max-w-full h-auto rounded-xl shadow-lg"
+                  style={{
+                    touchAction: activeHandle ? 'none' : 'pan-y pinch-zoom',
+                    WebkitFontSmoothing: 'antialiased',
+                    MozOsxFontSmoothing: 'grayscale',
+                    textRendering: 'optimizeLegibility',
+                    transform: 'translateZ(0)',
+                    backfaceVisibility: 'hidden',
+                  }}
+                  className="workspace-canvas crisp-render cursor-move max-w-full h-auto rounded-xl shadow-lg"
                 />
 
                 {/* Double-tap in-place rich text editor overlay */}
@@ -1670,161 +1896,527 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         </div>
       </div>
 
-      {/* 3. ALWAYS-VISIBLE THUMBNAIL STRIP WITH MULTI-PAGE SELECTION */}
-      <div className="fixed bottom-0 left-0 right-0 z-40 bg-[#121217]/95 backdrop-blur-md border-t border-[#262632] px-3 py-2 flex items-center gap-2.5 overflow-x-auto">
-        {/* Upload Buttons */}
-        <div className="flex items-center gap-1.5 shrink-0">
-          <input
-            ref={batchUploadRef}
-            type="file"
-            multiple
-            accept="image/png, image/jpeg, image/jpg"
-            onChange={(e) => handleUploadFiles(e.target.files)}
-            className="hidden"
-          />
-          <button
-            onClick={() => batchUploadRef.current?.click()}
-            className="bg-[#D4AF37] hover:bg-[#F4D58D] text-[#0B0B0F] font-bold text-xs px-3 py-2 rounded-xl flex items-center gap-1.5 shadow-md shadow-[#D4AF37]/20 transition-all min-h-[44px] shrink-0"
-            title="Batch Upload (many designs)"
-          >
-            <Upload className="w-3.5 h-3.5" />
-            <span className="whitespace-nowrap">Batch</span>
-          </button>
-
-          <input
-            ref={singleUploadRef}
-            type="file"
-            accept="image/png, image/jpeg, image/jpg"
-            onChange={(e) => handleUploadFiles(e.target.files)}
-            className="hidden"
-          />
-          <button
-            onClick={() => singleUploadRef.current?.click()}
-            className="bg-[#1C1C24] hover:bg-[#262632] border border-[#333342] text-[#FFF8E7] text-xs font-semibold px-2.5 py-2 rounded-xl flex items-center gap-1 transition-all min-h-[44px] shrink-0"
-            title="Single Upload"
-          >
-            <Plus className="w-3.5 h-3.5 text-[#D4AF37]" />
-            <span className="whitespace-nowrap hidden sm:inline">Single</span>
-          </button>
-        </div>
-
-        <div className="h-8 w-px bg-[#262632] shrink-0" />
-
-        {/* Multi-Select Toolbar Trigger */}
-        <div className="flex items-center gap-1.5 shrink-0">
-          {!isSelectMode ? (
-            <button
-              onClick={() => setIsSelectMode(true)}
-              className="px-2.5 py-2 bg-[#1C1C24] hover:bg-[#262632] border border-[#333342] text-xs font-semibold text-[#FFF8E7]/80 rounded-xl flex items-center gap-1 min-h-[44px]"
-              title="Select multiple designs to delete"
-            >
-              <CheckSquare className="w-3.5 h-3.5 text-[#D4AF37]" />
-              <span className="hidden sm:inline">Select</span>
-            </button>
-          ) : (
-            <div className="flex items-center gap-1.5">
+      {/* 4. DYNAMIC BOTTOM DOCK & FORMATTING POPOVERS (Exact match to IMG_1495 (2).pdf Page 2 vs Page 11) */}
+      <div className="fixed bottom-3 left-1/2 -translate-x-1/2 z-40 max-w-2xl w-[96%] sm:w-auto">
+        {/* Secondary Popover for Selected Tool (Font Size, Color, Styles, Effects, Format) */}
+        {selectedBox && activeSelectedTool && (
+          <div className="mb-2 bg-[#0B0B0F] border-2 border-[#D4AF37]/50 rounded-2xl p-4 shadow-2xl text-white animate-in slide-in-from-bottom-2 max-w-md mx-auto">
+            <div className="flex items-center justify-between mb-3 border-b border-[#262632] pb-2">
+              <span className="text-xs font-bold text-[#E5B224] uppercase tracking-wider">
+                {activeSelectedTool === 'styles' && 'Text Styles'}
+                {activeSelectedTool === 'size' && 'Font Size'}
+                {activeSelectedTool === 'color' && 'Color & Palette'}
+                {activeSelectedTool === 'effects' && 'Text Effects'}
+                {activeSelectedTool === 'format' && 'Format & Alignment'}
+              </span>
               <button
-                onClick={() => {
-                  if (selectedPageIds.size === project.pages.length) {
-                    setSelectedPageIds(new Set());
-                  } else {
-                    setSelectedPageIds(new Set(project.pages.map((p) => p.id)));
-                  }
-                }}
-                className="px-2 py-1.5 bg-[#21212A] text-[11px] font-semibold text-[#FFF8E7] rounded-lg border border-[#333342] min-h-[38px]"
+                onClick={() => setActiveSelectedTool(null)}
+                className="text-white/60 hover:text-white p-1 rounded-lg"
               >
-                {selectedPageIds.size === project.pages.length ? 'Deselect' : 'All'}
-              </button>
-
-              {selectedPageIds.size > 0 && (
-                <button
-                  onClick={() => setIsDeleteModalOpen(true)}
-                  className="px-2.5 py-1.5 bg-red-500 hover:bg-red-600 text-white text-xs font-bold rounded-lg flex items-center gap-1 min-h-[38px] shadow-md shadow-red-500/20"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  <span>Delete ({selectedPageIds.size})</span>
-                </button>
-              )}
-
-              <button
-                onClick={() => {
-                  setIsSelectMode(false);
-                  setSelectedPageIds(new Set());
-                }}
-                className="px-2 py-1.5 text-xs text-[#FFF8E7]/60 hover:text-white min-h-[38px]"
-              >
-                Done
+                <X className="w-4 h-4" />
               </button>
             </div>
+
+            {/* Styles Panel */}
+            {activeSelectedTool === 'styles' && (
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() =>
+                    handleUpdateTemplateBox(selectedBox.id, {
+                      fontSize: 40,
+                      fontWeight: '700',
+                      letterSpacing: -0.5,
+                    })
+                  }
+                  className="p-3 bg-[#17171C] hover:bg-[#262632] border border-[#333342] rounded-xl text-left"
+                >
+                  <div className="text-base font-bold text-white">Heading</div>
+                  <div className="text-[10px] text-white/50">40px • Bold</div>
+                </button>
+                <button
+                  onClick={() =>
+                    handleUpdateTemplateBox(selectedBox.id, {
+                      fontSize: 26,
+                      fontWeight: '600',
+                      letterSpacing: 0,
+                    })
+                  }
+                  className="p-3 bg-[#17171C] hover:bg-[#262632] border border-[#333342] rounded-xl text-left"
+                >
+                  <div className="text-sm font-semibold text-white">Subheading</div>
+                  <div className="text-[10px] text-white/50">26px • Semibold</div>
+                </button>
+                <button
+                  onClick={() =>
+                    handleUpdateTemplateBox(selectedBox.id, {
+                      fontSize: 18,
+                      fontWeight: '400',
+                      letterSpacing: 0,
+                    })
+                  }
+                  className="p-3 bg-[#17171C] hover:bg-[#262632] border border-[#333342] rounded-xl text-left"
+                >
+                  <div className="text-xs font-normal text-white">Body Text</div>
+                  <div className="text-[10px] text-white/50">18px • Regular</div>
+                </button>
+                <button
+                  onClick={() =>
+                    handleUpdateTemplateBox(selectedBox.id, {
+                      fontSize: 13,
+                      fontWeight: '600',
+                      letterSpacing: 1.5,
+                    })
+                  }
+                  className="p-3 bg-[#17171C] hover:bg-[#262632] border border-[#333342] rounded-xl text-left"
+                >
+                  <div className="text-xs font-semibold uppercase text-white">Caption</div>
+                  <div className="text-[10px] text-white/50">13px • Uppercase</div>
+                </button>
+              </div>
+            )}
+
+            {/* Font Size Panel */}
+            {activeSelectedTool === 'size' && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between text-xs font-semibold">
+                  <span>Size</span>
+                  <span className="font-mono text-[#E5B224]">{selectedBox.fontSize}px</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() =>
+                      handleUpdateTemplateBox(selectedBox.id, {
+                        fontSize: Math.max(8, selectedBox.fontSize - 2),
+                      })
+                    }
+                    className="p-2 bg-[#17171C] hover:bg-[#262632] border border-[#333342] rounded-lg"
+                  >
+                    <Minus className="w-4 h-4" />
+                  </button>
+                  <input
+                    type="range"
+                    min="8"
+                    max="120"
+                    value={selectedBox.fontSize}
+                    onChange={(e) =>
+                      handleUpdateTemplateBox(selectedBox.id, {
+                        fontSize: parseInt(e.target.value, 10),
+                      })
+                    }
+                    className="flex-1 accent-[#E5B224] h-1.5 bg-[#262632] rounded-lg cursor-pointer"
+                  />
+                  <button
+                    onClick={() =>
+                      handleUpdateTemplateBox(selectedBox.id, {
+                        fontSize: Math.min(144, selectedBox.fontSize + 2),
+                      })
+                    }
+                    className="p-2 bg-[#17171C] hover:bg-[#262632] border border-[#333342] rounded-lg"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="flex items-center gap-1.5 pt-1">
+                  {[14, 18, 24, 32, 48, 64].map((sz) => (
+                    <button
+                      key={sz}
+                      onClick={() => handleUpdateTemplateBox(selectedBox.id, { fontSize: sz })}
+                      className={`flex-1 py-1 text-xs font-mono rounded-lg border transition-all ${
+                        selectedBox.fontSize === sz
+                          ? 'bg-[#E5B224] text-black border-[#E5B224] font-bold'
+                          : 'bg-[#17171C] text-white/70 border-[#333342] hover:text-white'
+                      }`}
+                    >
+                      {sz}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Color Panel */}
+            {activeSelectedTool === 'color' && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-white/70">Hex Code</span>
+                  <div className="flex items-center gap-1 bg-[#17171C] border border-[#2D2D38] px-2 py-1 rounded-lg">
+                    <span className="text-xs text-[#E5B224] font-mono">#</span>
+                    <input
+                      type="text"
+                      maxLength={7}
+                      value={selectedBox.color.replace(/^#/, '')}
+                      onChange={(e) => {
+                        const val = e.target.value.trim();
+                        if (/^[0-9A-Fa-f]{0,6}$/.test(val)) {
+                          handleUpdateTemplateBox(selectedBox.id, { color: '#' + val });
+                        }
+                      }}
+                      className="w-16 bg-transparent text-xs font-mono text-white focus:outline-none uppercase"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                  {[
+                    '#E5B224',
+                    '#FFF8E7',
+                    '#F4D58D',
+                    '#FFFFFF',
+                    '#0B0B0F',
+                    '#EF4444',
+                    '#3B82F6',
+                    '#10B981',
+                    '#8B5CF6',
+                    '#F59E0B',
+                  ].map((hex) => (
+                    <button
+                      key={hex}
+                      onClick={() => handleUpdateTemplateBox(selectedBox.id, { color: hex })}
+                      className={`w-7 h-7 rounded-full border transition-all ${
+                        selectedBox.color.toUpperCase() === hex.toUpperCase()
+                          ? 'border-white scale-110 shadow-md ring-2 ring-[#E5B224]'
+                          : 'border-white/20 hover:scale-105'
+                      }`}
+                      style={{ backgroundColor: hex }}
+                      title={hex}
+                    />
+                  ))}
+                  <input
+                    type="color"
+                    value={
+                      selectedBox.color.startsWith('#') && selectedBox.color.length === 7
+                        ? selectedBox.color
+                        : '#E5B224'
+                    }
+                    onChange={(e) =>
+                      handleUpdateTemplateBox(selectedBox.id, { color: e.target.value })
+                    }
+                    className="w-7 h-7 rounded-full bg-transparent border-0 cursor-pointer shrink-0"
+                    title="Choose custom color"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Effects Panel */}
+            {activeSelectedTool === 'effects' && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-4 gap-1.5">
+                  {(['none', 'shadow', 'glow', 'outline', 'neon', 'hollow', 'highlight'] as const).map(
+                    (effect) => (
+                      <button
+                        key={effect}
+                        onClick={() => {
+                          const currentEffects = selectedBox.effects || {};
+                          if (effect === 'none') {
+                            handleUpdateTemplateBox(selectedBox.id, { effects: undefined });
+                          } else {
+                            handleUpdateTemplateBox(selectedBox.id, {
+                              effects: {
+                                ...currentEffects,
+                                shadow: effect === 'shadow' ? { blur: 8, color: '#000000', offsetX: 2, offsetY: 2 } : currentEffects.shadow,
+                                glow: effect === 'glow' ? { blur: 12, color: '#E5B224', opacity: 0.9 } : currentEffects.glow,
+                                outline: effect === 'outline' ? { width: 2, color: '#000000' } : currentEffects.outline,
+                                neon: effect === 'neon' ? { intensity: 1.5, color: '#00FFA3' } : currentEffects.neon,
+                                hollow: effect === 'hollow' ? { strokeWidth: 1.5, strokeColor: selectedBox.color } : currentEffects.hollow,
+                                highlight: effect === 'highlight' ? { color: '#FFE600', opacity: 0.6 } : currentEffects.highlight,
+                              },
+                            });
+                          }
+                        }}
+                        className="py-1.5 px-2 bg-[#17171C] hover:bg-[#262632] border border-[#333342] text-[11px] font-semibold rounded-lg capitalize text-center"
+                      >
+                        {effect}
+                      </button>
+                    )
+                  )}
+                  <button
+                    onClick={() => handleUpdateTemplateBox(selectedBox.id, { effects: undefined })}
+                    className="py-1.5 px-2 bg-red-950/40 hover:bg-red-900/60 border border-red-800 text-[11px] font-semibold rounded-lg text-red-300 text-center"
+                  >
+                    Reset
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Format Panel */}
+            {activeSelectedTool === 'format' && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() =>
+                      handleUpdateTemplateBox(selectedBox.id, {
+                        fontWeight:
+                          selectedBox.fontWeight === '700' || selectedBox.fontWeight === '800'
+                            ? '400'
+                            : '700',
+                      })
+                    }
+                    className={`p-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center flex-1 ${
+                      selectedBox.fontWeight === '700' || selectedBox.fontWeight === '800'
+                        ? 'bg-[#E5B224] text-black font-extrabold'
+                        : 'bg-[#17171C] text-white/70 hover:text-white'
+                    }`}
+                  >
+                    <Bold className="w-4 h-4 mr-1" />
+                    <span>Bold</span>
+                  </button>
+
+                  <button
+                    onClick={() =>
+                      handleUpdateTemplateBox(selectedBox.id, {
+                        fontStyle: selectedBox.fontStyle === 'italic' ? 'normal' : 'italic',
+                      })
+                    }
+                    className={`p-2 rounded-lg text-xs italic transition-all flex items-center justify-center flex-1 ${
+                      selectedBox.fontStyle === 'italic'
+                        ? 'bg-[#E5B224] text-black'
+                        : 'bg-[#17171C] text-white/70 hover:text-white'
+                    }`}
+                  >
+                    <Italic className="w-4 h-4 mr-1" />
+                    <span>Italic</span>
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-1 bg-[#17171C] p-1 rounded-xl border border-[#333342]">
+                  {(['left', 'center', 'right', 'justify'] as const).map((align) => (
+                    <button
+                      key={align}
+                      onClick={() => handleUpdateTemplateBox(selectedBox.id, { textAlign: align })}
+                      className={`flex-1 py-1.5 rounded-lg text-xs transition-all flex items-center justify-center ${
+                        selectedBox.textAlign === align
+                          ? 'bg-[#E5B224] text-black'
+                          : 'text-white/60 hover:text-white'
+                      }`}
+                    >
+                      {align === 'left' && <AlignLeft className="w-4 h-4" />}
+                      {align === 'center' && <AlignCenter className="w-4 h-4" />}
+                      {align === 'right' && <AlignRight className="w-4 h-4" />}
+                      {align === 'justify' && <AlignJustify className="w-4 h-4" />}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Upload Sub-Popup (When Upload button is clicked in unselected dock) */}
+        {isUploadMenuOpen && !selectedBoxId && (
+          <div className="mb-2 bg-[#0B0B0F] border-2 border-[#D4AF37]/50 rounded-2xl p-3 shadow-2xl text-white flex items-center gap-2 animate-in slide-in-from-bottom-2 max-w-xs mx-auto">
+            <button
+              onClick={() => {
+                setIsUploadMenuOpen(false);
+                batchUploadRef.current?.click();
+              }}
+              className="flex-1 py-2 bg-[#E5B224] text-black text-xs font-bold rounded-xl flex items-center justify-center gap-1.5"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              <span>Batch Upload</span>
+            </button>
+            <button
+              onClick={() => {
+                setIsUploadMenuOpen(false);
+                singleUploadRef.current?.click();
+              }}
+              className="flex-1 py-2 bg-[#1C1C24] hover:bg-[#262632] border border-[#333342] text-white text-xs font-semibold rounded-xl flex items-center justify-center gap-1"
+            >
+              <Plus className="w-3.5 h-3.5 text-[#E5B224]" />
+              <span>Single</span>
+            </button>
+          </div>
+        )}
+
+        {/* The Fixed Dock Container */}
+        <div className="bg-[#0B0B0F] border-2 border-black/40 rounded-2xl px-2 sm:px-4 py-2 shadow-2xl flex items-center justify-between sm:justify-center gap-1 sm:gap-2.5 text-white">
+          {selectedBoxId === null ? (
+            /* STATE A: UNSELECTED TEXT (Exact match to IMG_1495 (2).pdf Page 2) */
+            <>
+              {/* [A Text] */}
+              <button
+                onClick={() => setIsRightPanelOpen(!isRightPanelOpen)}
+                className="flex flex-col items-center justify-center px-2 py-1 rounded-xl text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24] transition-all min-w-[50px] min-h-[46px]"
+                title="Text Fields"
+              >
+                <Type className="w-4 h-4 text-[#E5B224]" />
+                <span className="text-[10px] font-bold mt-1">Text</span>
+              </button>
+
+              {/* [📷 Upload] */}
+              <button
+                onClick={() => setIsUploadMenuOpen(!isUploadMenuOpen)}
+                className="flex flex-col items-center justify-center px-2 py-1 rounded-xl text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24] transition-all min-w-[50px] min-h-[46px]"
+                title="Upload Backgrounds"
+              >
+                <Upload className="w-4 h-4 text-[#E5B224]" />
+                <span className="text-[10px] font-bold mt-1">Upload</span>
+              </button>
+
+              {/* [📑 Fields] */}
+              <button
+                onClick={() => setIsSpreadsheetOpen(true)}
+                className="flex flex-col items-center justify-center px-2 py-1 rounded-xl text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24] transition-all min-w-[50px] min-h-[46px]"
+                title="Spreadsheet Fields"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-[#E5B224]" />
+                <span className="text-[10px] font-bold mt-1">Fields</span>
+              </button>
+
+              {/* [🔄 Sync Layout] */}
+              <button
+                onClick={() => setIsSyncLayoutOpen(true)}
+                className="flex flex-col items-center justify-center px-2 py-1 rounded-xl text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24] transition-all min-w-[58px] min-h-[46px]"
+                title="Sync Layout across designs"
+              >
+                <RefreshCw className="w-4 h-4 text-[#E5B224]" />
+                <span className="text-[10px] font-bold mt-1 whitespace-nowrap">Sync Layout</span>
+              </button>
+
+              {/* [+ Add] */}
+              <button
+                onClick={() => setIsAddPanelOpen(true)}
+                className="flex flex-col items-center justify-center px-2 py-1 rounded-xl text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24] transition-all min-w-[50px] min-h-[46px]"
+                title="Add Elements"
+              >
+                <Plus className="w-4 h-4 text-[#E5B224]" />
+                <span className="text-[10px] font-bold mt-1">Add</span>
+              </button>
+
+              {/* [🖋️ More] */}
+              <button
+                onClick={() => setIsMoreMenuOpen(true)}
+                className="flex flex-col items-center justify-center px-2 py-1 rounded-xl text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24] transition-all min-w-[50px] min-h-[46px]"
+                title="More Options"
+              >
+                <Feather className="w-4 h-4 text-[#E5B224]" />
+                <span className="text-[10px] font-bold mt-1">More</span>
+              </button>
+            </>
+          ) : (
+            /* STATE B: SELECTED TEXT (Exact match to IMG_1495 (2).pdf Page 11) */
+            <>
+              {/* [✏️ Edit (pencil)] */}
+              <button
+                onClick={() => selectedBox && setEditingRichBoxId(selectedBox.id)}
+                className="flex flex-col items-center justify-center px-2 py-1 rounded-xl text-[#E5B224] bg-[#1A1A24] hover:bg-[#262632] transition-all min-w-[46px] min-h-[46px]"
+                title="Word-Level Text Editor"
+              >
+                <Edit3 className="w-4 h-4" />
+                <span className="text-[10px] font-bold mt-1">Edit</span>
+              </button>
+
+              {/* [🖼️ Text Styles] */}
+              <button
+                onClick={() =>
+                  setActiveSelectedTool(activeSelectedTool === 'styles' ? null : 'styles')
+                }
+                className={`flex flex-col items-center justify-center px-2 py-1 rounded-xl transition-all min-w-[48px] min-h-[46px] ${
+                  activeSelectedTool === 'styles'
+                    ? 'bg-[#E5B224] text-black'
+                    : 'text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24]'
+                }`}
+                title="Text Styles"
+              >
+                <Layers className="w-4 h-4" />
+                <span className="text-[10px] font-bold mt-1 whitespace-nowrap">Styles</span>
+              </button>
+
+              {/* [🪶 Font] */}
+              <button
+                onClick={() => setIsFontManagerOpen(true)}
+                className="flex flex-col items-center justify-center px-2 py-1 rounded-xl text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24] transition-all min-w-[46px] min-h-[46px]"
+                title="Select Font"
+              >
+                <Type className="w-4 h-4 text-[#E5B224]" />
+                <span className="text-[10px] font-bold mt-1">Font</span>
+              </button>
+
+              {/* [a Font size] */}
+              <button
+                onClick={() =>
+                  setActiveSelectedTool(activeSelectedTool === 'size' ? null : 'size')
+                }
+                className={`flex flex-col items-center justify-center px-2 py-1 rounded-xl transition-all min-w-[48px] min-h-[46px] ${
+                  activeSelectedTool === 'size'
+                    ? 'bg-[#E5B224] text-black'
+                    : 'text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24]'
+                }`}
+                title="Font Size"
+              >
+                <span className="text-xs font-bold leading-none">aA</span>
+                <span className="text-[10px] font-bold mt-1 whitespace-nowrap">Size</span>
+              </button>
+
+              {/* [🎨 Color] */}
+              <button
+                onClick={() =>
+                  setActiveSelectedTool(activeSelectedTool === 'color' ? null : 'color')
+                }
+                className={`flex flex-col items-center justify-center px-2 py-1 rounded-xl transition-all min-w-[46px] min-h-[46px] ${
+                  activeSelectedTool === 'color'
+                    ? 'bg-[#E5B224] text-black'
+                    : 'text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24]'
+                }`}
+                title="Text Color"
+              >
+                <Palette className="w-4 h-4" />
+                <span className="text-[10px] font-bold mt-1">Color</span>
+              </button>
+
+              {/* [✨ Effects] */}
+              <button
+                onClick={() =>
+                  setActiveSelectedTool(activeSelectedTool === 'effects' ? null : 'effects')
+                }
+                className={`flex flex-col items-center justify-center px-2 py-1 rounded-xl transition-all min-w-[48px] min-h-[46px] ${
+                  activeSelectedTool === 'effects'
+                    ? 'bg-[#E5B224] text-black'
+                    : 'text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24]'
+                }`}
+                title="Text Effects"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span className="text-[10px] font-bold mt-1">Effects</span>
+              </button>
+
+              {/* [🔤 Format] */}
+              <button
+                onClick={() =>
+                  setActiveSelectedTool(activeSelectedTool === 'format' ? null : 'format')
+                }
+                className={`flex flex-col items-center justify-center px-2 py-1 rounded-xl transition-all min-w-[48px] min-h-[46px] ${
+                  activeSelectedTool === 'format'
+                    ? 'bg-[#E5B224] text-black'
+                    : 'text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24]'
+                }`}
+                title="Format & Alignment"
+              >
+                <SlidersHorizontal className="w-4 h-4" />
+                <span className="text-[10px] font-bold mt-1">Format</span>
+              </button>
+            </>
           )}
         </div>
-
-        <div className="h-8 w-px bg-[#262632] shrink-0" />
-
-        {/* Thumbnails Carousel */}
-        <div className="flex items-center gap-2 overflow-x-auto py-1">
-          {project.pages.map((page, idx) => {
-            const isActive = idx === activePageIndex;
-            const thumbUrl = thumbnailUrls[page.id];
-            const isChecked = selectedPageIds.has(page.id);
-
-            return (
-              <div
-                key={page.id}
-                onClick={() => {
-                  if (isSelectMode) {
-                    setSelectedPageIds((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(page.id)) next.delete(page.id);
-                      else next.add(page.id);
-                      return next;
-                    });
-                  } else {
-                    handleSelectPage(idx);
-                  }
-                }}
-                className={`relative shrink-0 rounded-xl overflow-hidden border-2 cursor-pointer transition-all min-h-[44px] ${
-                  isChecked
-                    ? 'border-red-500 ring-2 ring-red-500/40'
-                    : isActive
-                    ? 'border-[#D4AF37] ring-2 ring-[#D4AF37]/30 scale-105'
-                    : 'border-[#262632] opacity-75 hover:opacity-100'
-                }`}
-                style={{ width: '60px', height: '60px' }}
-              >
-                {thumbUrl ? (
-                  <img
-                    src={thumbUrl}
-                    alt={page.name}
-                    className="w-full h-full object-cover"
-                    loading="lazy"
-                  />
-                ) : (
-                  <div className="w-full h-full bg-[#1A1A24] flex items-center justify-center text-[10px] text-[#FFF8E7]/40">
-                    #{idx + 1}
-                  </div>
-                )}
-
-                {/* Index badge */}
-                <span className="absolute bottom-0.5 right-1 text-[9px] font-mono font-bold bg-black/75 px-1 rounded text-white">
-                  {idx + 1}
-                </span>
-
-                {/* Multi-select checkbox indicator */}
-                {isSelectMode && (
-                  <div className="absolute top-1 left-1">
-                    {isChecked ? (
-                      <CheckSquare className="w-4 h-4 text-red-500 fill-white" />
-                    ) : (
-                      <Square className="w-4 h-4 text-white/80" />
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
       </div>
+
+      {/* Hidden File Inputs for Background Uploads */}
+      <input
+        ref={batchUploadRef}
+        type="file"
+        multiple
+        accept="image/png, image/jpeg, image/jpg"
+        onChange={(e) => handleUploadFiles(e.target.files)}
+        className="hidden"
+      />
+      <input
+        ref={singleUploadRef}
+        type="file"
+        accept="image/png, image/jpeg, image/jpg"
+        onChange={(e) => handleUploadFiles(e.target.files)}
+        className="hidden"
+      />
 
       {/* Multi-Page Delete Confirmation Modal */}
       {isDeleteModalOpen && (
@@ -1858,6 +2450,72 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         </div>
       )}
 
+      {/* Sync Layout Modal (IMG_1495 (2).pdf Page 14) */}
+      <SyncLayoutModal
+        project={project}
+        activePageIndex={activePageIndex}
+        isOpen={isSyncLayoutOpen}
+        onClose={() => setIsSyncLayoutOpen(false)}
+        onSyncAll={handleSyncAllPages}
+        onSyncCustomPages={handleSyncCustomPages}
+        onSyncFieldToPages={handleSyncFieldToPages}
+      />
+
+      {/* Add Element Panel (IMG_1495 (2).pdf Page 17) */}
+      <AddPanelModal
+        isOpen={isAddPanelOpen}
+        onClose={() => setIsAddPanelOpen(false)}
+        onAddTextBox={handleAddFromPanel}
+        onApplyFontCombination={handleApplyFontCombination}
+      />
+
+      {/* More Menu Drawer (IMG_1495 (2).pdf Pages 19-20) */}
+      <MoreMenuDrawer
+        project={project}
+        activePageIndex={activePageIndex}
+        isOpen={isMoreMenuOpen}
+        onClose={() => setIsMoreMenuOpen(false)}
+        onRenameProject={(newName) => {
+          const updated = { ...project, name: newName };
+          onUpdateProject(updated);
+          triggerAutoSave(updated);
+        }}
+        onToggleThumbnails={() => {
+          setShowTopThumbnails(!showTopThumbnails);
+          setIsMoreMenuOpen(false);
+        }}
+        onDeleteCurrentPage={() => {
+          if (project.pages.length <= 1) {
+            alert('A project must have at least one design page.');
+            return;
+          }
+          const targetPageId = activePage?.id;
+          if (targetPageId) {
+            deleteDesignsFromProjectAtomic(project.id, [targetPageId]).then((updated) => {
+              onUpdateProject(updated);
+              setIsMoreMenuOpen(false);
+              showToast('Design deleted');
+            });
+          }
+        }}
+        onOpenTemplates={() => {
+          setIsMoreMenuOpen(false);
+          showToast('Template saved to storage');
+        }}
+        onOpenDownload={() => {
+          setIsMoreMenuOpen(false);
+          setIsDownloadOpen(true);
+        }}
+      />
+
+      {/* Social Media Share Modal (IMG_1495 (2).pdf Page 10) */}
+      <SocialShareModal
+        project={project}
+        activePageIndex={activePageIndex}
+        isOpen={isSocialShareOpen}
+        onClose={() => setIsSocialShareOpen(false)}
+      />
+
       {/* Spreadsheet Bottom Sheet */}
       <SpreadsheetSheet
         project={project}
@@ -1870,7 +2528,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         }}
       />
 
-      {/* Download Bottom Sheet */}
+      {/* Download Bottom Sheet (IMG_1495 (2).pdf Pages 6-9) */}
       <DownloadSheet
         project={project}
         activePageIndex={activePageIndex}

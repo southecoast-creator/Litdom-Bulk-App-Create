@@ -138,10 +138,12 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
 
   const [tokens, setTokens] = useState<WordToken[]>(initialTokens);
 
-  // Selected word indices (e.g. Set(2) for word index 2)
+  // Selected word indices (e.g. Set of wordIndex numbers)
   const [selectedWordIndices, setSelectedWordIndices] = useState<Set<number>>(new Set());
   const [lastTappedWordIndex, setLastTappedWordIndex] = useState<number | null>(null);
   const [isRangeMode, setIsRangeMode] = useState<boolean>(false);
+  const [rangeAnchorIndex, setRangeAnchorIndex] = useState<number | null>(null);
+  const [isMultiSelectMode, setIsMultiSelectMode] = useState<boolean>(false);
 
   // Sub-sheets inside the docked bottom panel
   const [isFontSheetOpen, setIsFontSheetOpen] = useState(false);
@@ -181,9 +183,12 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
   // Selected word text summary
   const selectedWordSummary = useMemo(() => {
     if (selectedTokens.length === 0) return '';
-    if (selectedTokens.length === 1) return selectedTokens[0].text;
-    if (selectedTokens.length === totalWords && totalWords > 1) return 'All words';
-    return `${selectedTokens.length} words`;
+    if (selectedTokens.length === 1) return `1 word: "${selectedTokens[0].text}"`;
+    if (selectedTokens.length === totalWords && totalWords > 1) return `All words (${totalWords})`;
+    if (selectedTokens.length <= 3) {
+      return `${selectedTokens.length} words: ${selectedTokens.map((t) => `"${t.text}"`).join(', ')}`;
+    }
+    return `${selectedTokens.length} words selected`;
   }, [selectedTokens, totalWords]);
 
   // Selected styles inspection
@@ -192,10 +197,29 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
   const isSelectedUnderline = hasSelection && selectedTokens.every((t) => t.underline);
   const isSelectedStrike = hasSelection && selectedTokens.every((t) => t.strike);
 
-  const selectedFont = hasSelection ? selectedTokens[0].fontFamily || box.fontFamily : box.fontFamily;
-  const selectedColor = hasSelection ? selectedTokens[0].color || box.color : box.color;
-  const selectedFontSize = hasSelection ? selectedTokens[0].fontSize || box.fontSize : box.fontSize;
-  const selectedLetterSpacing = hasSelection ? selectedTokens[0].letterSpacing || 0 : (box.letterSpacing || 0);
+  const selectedFont = useMemo(() => {
+    if (!hasSelection) return box.fontFamily;
+    const firstFont = selectedTokens[0].fontFamily || box.fontFamily;
+    const allSame = selectedTokens.every((t) => (t.fontFamily || box.fontFamily) === firstFont);
+    return allSame ? firstFont : 'Mixed';
+  }, [hasSelection, selectedTokens, box.fontFamily]);
+
+  const selectedColor = useMemo(() => {
+    if (!hasSelection) return box.color || '#FFF8E7';
+    const firstColor = selectedTokens[0].color || box.color || '#FFF8E7';
+    const allSame = selectedTokens.every((t) => (t.color || box.color) === firstColor);
+    return allSame ? firstColor : '#D4AF37';
+  }, [hasSelection, selectedTokens, box.color]);
+
+  const selectedFontSize = useMemo(() => {
+    if (!hasSelection) return box.fontSize;
+    return selectedTokens[0].fontSize || box.fontSize;
+  }, [hasSelection, selectedTokens, box.fontSize]);
+
+  const selectedLetterSpacing = useMemo(() => {
+    if (!hasSelection) return box.letterSpacing || 0;
+    return selectedTokens[0].letterSpacing || 0;
+  }, [hasSelection, selectedTokens, box.letterSpacing]);
 
   // Active effect on selection
   const selectedEffectType = useMemo(() => {
@@ -257,23 +281,72 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
     [box, onSave]
   );
 
-  // Word selection handlers
+  // Word selection handlers: supports single word, multi-word (1, 2, 3, or more words), range, and select all
   const handleWordTap = (wordIndex: number) => {
-    if (isRangeMode && lastTappedWordIndex !== null) {
-      // Range selection: from lastTapped to wordIndex
-      const start = Math.min(lastTappedWordIndex, wordIndex);
-      const end = Math.max(lastTappedWordIndex, wordIndex);
-      const newSet = new Set<number>();
-      for (let i = start; i <= end; i++) {
-        newSet.add(i);
+    if (isRangeMode) {
+      if (rangeAnchorIndex === null) {
+        // Step 1 of Range: set start anchor
+        setRangeAnchorIndex(wordIndex);
+        setSelectedWordIndices(new Set([wordIndex]));
+        setLastTappedWordIndex(wordIndex);
+      } else {
+        // Step 2 of Range: complete range selection from anchor to tapped word
+        const start = Math.min(rangeAnchorIndex, wordIndex);
+        const end = Math.max(rangeAnchorIndex, wordIndex);
+        const rangeSet = new Set<number>();
+        for (let i = start; i <= end; i++) {
+          rangeSet.add(i);
+        }
+        setSelectedWordIndices(rangeSet);
+        setIsRangeMode(false);
+        setRangeAnchorIndex(null);
+        setLastTappedWordIndex(wordIndex);
       }
-      setSelectedWordIndices(newSet);
-      setIsRangeMode(false);
-    } else {
-      // Single word select
-      setSelectedWordIndices(new Set([wordIndex]));
+    } else if (isMultiSelectMode) {
+      // Multi-select mode: toggle word in or out of selection
+      setSelectedWordIndices((prev) => {
+        const next = new Set(prev);
+        if (next.has(wordIndex)) {
+          next.delete(wordIndex);
+        } else {
+          next.add(wordIndex);
+        }
+        return next;
+      });
       setLastTappedWordIndex(wordIndex);
+    } else {
+      // Standard single word select:
+      // Tapping the same single selected word toggles it off
+      if (selectedWordIndices.size === 1 && selectedWordIndices.has(wordIndex)) {
+        setSelectedWordIndices(new Set());
+        setLastTappedWordIndex(null);
+      } else {
+        setSelectedWordIndices(new Set([wordIndex]));
+        setLastTappedWordIndex(wordIndex);
+      }
     }
+  };
+
+  const handleToggleRangeMode = () => {
+    if (isRangeMode) {
+      setIsRangeMode(false);
+      setRangeAnchorIndex(null);
+    } else {
+      setIsRangeMode(true);
+      setIsMultiSelectMode(false);
+      // If exactly 1 word is already selected, make it the starting anchor immediately!
+      if (selectedWordIndices.size === 1) {
+        setRangeAnchorIndex(Array.from(selectedWordIndices)[0]);
+      } else {
+        setRangeAnchorIndex(null);
+      }
+    }
+  };
+
+  const handleToggleMultiSelectMode = () => {
+    setIsMultiSelectMode((prev) => !prev);
+    setIsRangeMode(false);
+    setRangeAnchorIndex(null);
   };
 
   const handleSelectAll = () => {
@@ -282,13 +355,16 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
       all.add(i);
     }
     setSelectedWordIndices(all);
+    setIsRangeMode(false);
+    setRangeAnchorIndex(null);
     setLastTappedWordIndex(0);
   };
 
   const handleClearSelection = () => {
     setSelectedWordIndices(new Set());
-    setLastTappedWordIndex(null);
     setIsRangeMode(false);
+    setRangeAnchorIndex(null);
+    setLastTappedWordIndex(null);
   };
 
   // Format updater: modifies ONLY selected word tokens
@@ -439,23 +515,26 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
 
   const handleStyleWordEverywhere = () => {
     if (!selectedTokens.length) return;
-    const word = selectedTokens[0].text.trim();
-    if (!word) return;
-
-    onStyleWordInAllDesigns(word, {
-      bold: selectedTokens[0].bold,
-      italic: selectedTokens[0].italic,
-      underline: selectedTokens[0].underline,
-      strike: selectedTokens[0].strike,
-      color: selectedTokens[0].color,
-      fontFamily: selectedTokens[0].fontFamily,
-      fontSize: selectedTokens[0].fontSize,
-      letterSpacing: selectedTokens[0].letterSpacing,
-      effects: selectedTokens[0].effects,
-    });
+    const seen = new Set<string>();
+    for (const tok of selectedTokens) {
+      const word = tok.text.trim();
+      if (!word || seen.has(word)) continue;
+      seen.add(word);
+      onStyleWordInAllDesigns(word, {
+        bold: tok.bold,
+        italic: tok.italic,
+        underline: tok.underline,
+        strike: tok.strike,
+        color: tok.color,
+        fontFamily: tok.fontFamily,
+        fontSize: tok.fontSize,
+        letterSpacing: tok.letterSpacing,
+        effects: tok.effects,
+      });
+    }
   };
 
-  const scaledPadding = (box.padding || 0) * scale;
+  const scaledPadding = Math.round((box.padding || 0) * scale);
   const recentColors = ['#D4AF37', '#FFF8E7', '#EF4444', '#10B981', '#3B82F6', '#FFFFFF', '#000000'];
 
   return (
@@ -463,12 +542,12 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
       {/* 1. ON-CANVAS TAPPABLE WORD OVERLAY (Zero native selection fighting) */}
       <div
         onContextMenu={(e) => e.preventDefault()}
-        className="absolute z-40 select-none overflow-visible rounded-sm border border-dashed border-[#D4AF37]/50"
+        className="workspace-canvas text-element crisp-render absolute z-40 select-none overflow-visible rounded-sm border border-dashed border-[#D4AF37]/50"
         style={{
-          left: boxX,
-          top: boxY,
-          width: boxW,
-          minHeight: Math.max(32, boxH),
+          left: Math.round(boxX),
+          top: Math.round(boxY),
+          width: Math.round(boxW),
+          minHeight: Math.max(32, Math.round(boxH)),
           padding: `${scaledPadding}px`,
           textAlign: box.textAlign || 'center',
           lineHeight: box.lineHeight || 1.3,
@@ -476,6 +555,11 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
           userSelect: 'none',
           WebkitUserSelect: 'none',
           WebkitTouchCallout: 'none',
+          WebkitFontSmoothing: 'antialiased',
+          MozOsxFontSmoothing: 'grayscale',
+          textRendering: 'optimizeLegibility',
+          transform: 'translateZ(0)',
+          backfaceVisibility: 'hidden',
         }}
       >
         {tokens.map((token) => {
@@ -486,10 +570,13 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
             return (
               <span
                 key={token.id}
-                className="inline select-none whitespace-pre"
+                className="inline select-none whitespace-pre text-element crisp-render"
                 style={{
                   fontSize: `${Math.round((token.fontSize || box.fontSize) * scale)}px`,
                   fontFamily: `"${token.fontFamily || box.fontFamily}", sans-serif`,
+                  WebkitFontSmoothing: 'antialiased',
+                  MozOsxFontSmoothing: 'grayscale',
+                  textRendering: 'optimizeLegibility',
                 }}
               >
                 {token.text}
@@ -498,6 +585,7 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
           }
 
           const isSelected = selectedWordIndices.has(token.wordIndex);
+          const isAnchor = isRangeMode && rangeAnchorIndex === token.wordIndex;
           const isB = token.bold;
           const isI = token.italic;
           const isU = token.underline;
@@ -514,8 +602,10 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
                 e.stopPropagation();
                 handleWordTap(token.wordIndex);
               }}
-              className={`inline-block cursor-pointer select-none rounded-md px-1 py-0.5 transition-all active:scale-95 ${
-                isSelected
+              className={`text-element crisp-render inline-block cursor-pointer select-none rounded-md px-1.5 py-0.5 transition-all active:scale-95 ${
+                isAnchor
+                  ? 'bg-amber-500/40 ring-2 ring-amber-400 shadow-lg text-white font-bold animate-pulse'
+                  : isSelected
                   ? 'bg-[#D4AF37]/35 ring-2 ring-[#D4AF37] shadow-lg shadow-[#D4AF37]/20 text-white font-bold'
                   : 'hover:bg-[#FFF8E7]/10'
               }`}
@@ -526,12 +616,24 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
                 fontWeight: isB ? '800' : '400',
                 fontStyle: isI ? 'italic' : 'normal',
                 textDecoration: `${isU ? 'underline ' : ''}${isS ? 'line-through' : ''}`.trim() || 'none',
-                letterSpacing: `${letterSpacingPx}px`,
+                letterSpacing: `${Math.round(letterSpacingPx * 10) / 10}px`,
                 userSelect: 'none',
                 WebkitUserSelect: 'none',
                 WebkitTouchCallout: 'none',
+                WebkitFontSmoothing: 'antialiased',
+                MozOsxFontSmoothing: 'grayscale',
+                textRendering: 'optimizeLegibility',
+                transform: 'translateZ(0)',
               }}
-              title={`Tap to style "${token.text}"`}
+              title={
+                isRangeMode
+                  ? rangeAnchorIndex === null
+                    ? `Tap to start range with "${token.text}"`
+                    : `Tap to end range with "${token.text}"`
+                  : isMultiSelectMode
+                  ? `Tap to toggle "${token.text}" in selection`
+                  : `Tap to style "${token.text}"`
+              }
             >
               {token.text}
             </span>
@@ -544,67 +646,120 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
         onContextMenu={(e) => e.preventDefault()}
         className="fixed bottom-0 left-0 right-0 z-50 bg-[#121217]/98 backdrop-blur-xl border-t border-[#262632] shadow-2xl flex flex-col text-[#FFF8E7] animate-in slide-in-from-bottom-4 duration-200 select-none pb-safe"
       >
-        {/* Header Bar: Status & Selection Mode */}
+        {/* Header Bar: Status & Done */}
         <div className="flex items-center justify-between px-3.5 py-2 border-b border-[#212128] bg-[#17171C]/90 text-xs gap-2">
           {/* Active Word Tag */}
           <div className="flex items-center gap-1.5 min-w-0">
             {hasSelection ? (
               <span className="flex items-center gap-1.5 bg-[#D4AF37]/20 border border-[#D4AF37]/40 px-2.5 py-1 rounded-full text-[#D4AF37] font-bold truncate">
                 <span className="w-1.5 h-1.5 rounded-full bg-[#D4AF37] animate-pulse" />
-                <span className="truncate max-w-[150px]">
+                <span className="truncate max-w-[200px] sm:max-w-xs">
                   {selectedWordSummary}
                 </span>
               </span>
             ) : (
-              <span className="text-[#FFF8E7]/60 italic flex items-center gap-1">
-                👉 Tap a word above to style it
+              <span className="text-[#FFF8E7]/60 italic flex items-center gap-1 text-[11px]">
+                👉 Tap words above or use selection tools below
               </span>
             )}
           </div>
 
-          {/* Quick Select Actions */}
-          <div className="flex items-center gap-1 shrink-0">
-            <button
-              type="button"
-              onClick={() => setIsRangeMode(!isRangeMode)}
-              className={`px-2 py-1 rounded-lg border text-[11px] font-semibold transition-all min-h-[34px] flex items-center gap-1 ${
-                isRangeMode
-                  ? 'bg-[#D4AF37] text-[#0B0B0F] border-[#D4AF37] font-bold'
-                  : 'bg-[#21212A] border-[#333342] text-[#FFF8E7]/70 hover:text-white'
-              }`}
-              title="Tap a word, then hold Range and tap another word"
-            >
-              <span>Range</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleSelectAll}
-              className="px-2 py-1 bg-[#21212A] hover:bg-[#2B2B38] border border-[#333342] text-[11px] font-semibold text-[#FFF8E7]/80 rounded-lg transition-colors min-h-[34px]"
-            >
-              All
-            </button>
-
-            {hasSelection && (
-              <button
-                type="button"
-                onClick={handleClearSelection}
-                className="px-2 py-1 text-[11px] text-[#FFF8E7]/50 hover:text-white min-h-[34px]"
-              >
-                Clear
-              </button>
-            )}
-
+          <div className="flex items-center gap-1.5 shrink-0">
             <button
               type="button"
               onClick={onClose}
-              className="bg-[#D4AF37] hover:bg-[#F4D58D] text-[#0B0B0F] font-bold text-xs px-3 py-1.5 rounded-xl flex items-center gap-1 min-h-[34px] transition-all ml-1 shadow-md shadow-[#D4AF37]/20"
+              className="bg-[#D4AF37] hover:bg-[#F4D58D] text-[#0B0B0F] font-bold text-xs px-3.5 py-1.5 rounded-xl flex items-center gap-1 min-h-[36px] transition-all shadow-md shadow-[#D4AF37]/20 active:scale-95"
               title="Done Styling Words"
             >
               <Check className="w-3.5 h-3.5 stroke-[3]" />
               <span>Done</span>
             </button>
           </div>
+        </div>
+
+        {/* Word Selection Utility Bar: Select all, Select range, Multi-word, Clear */}
+        <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-[#212128]/80 bg-[#14141A] overflow-x-auto scrollbar-none text-xs">
+          {/* Select all utility button */}
+          <button
+            type="button"
+            onClick={handleSelectAll}
+            className={`px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all min-h-[36px] flex items-center gap-1.5 shrink-0 active:scale-95 ${
+              selectedWordIndices.size === totalWords && totalWords > 0
+                ? 'bg-[#D4AF37] text-[#0B0B0F] border-[#D4AF37] font-bold shadow-sm'
+                : 'bg-[#1C1C24] hover:bg-[#262632] border-[#333342] text-[#FFF8E7]/90'
+            }`}
+            title="Select all words in this text box"
+          >
+            <CheckSquare className="w-3.5 h-3.5" />
+            <span>Select all</span>
+            {totalWords > 0 && (
+              <span className="text-[10px] opacity-75 font-mono">({totalWords})</span>
+            )}
+          </button>
+
+          {/* Select range utility button */}
+          <button
+            type="button"
+            onClick={handleToggleRangeMode}
+            className={`px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all min-h-[36px] flex items-center gap-1.5 shrink-0 active:scale-95 ${
+              isRangeMode
+                ? 'bg-[#D4AF37] text-[#0B0B0F] border-[#D4AF37] font-bold shadow-md shadow-[#D4AF37]/20 ring-1 ring-[#D4AF37]'
+                : 'bg-[#1C1C24] hover:bg-[#262632] border-[#333342] text-[#FFF8E7]/90'
+            }`}
+            title="Select a continuous range of words without long-pressing"
+          >
+            <Layers className="w-3.5 h-3.5" />
+            <span>Select range</span>
+            {isRangeMode && (
+              <span className="w-2 h-2 rounded-full bg-[#0B0B0F] animate-ping" />
+            )}
+          </button>
+
+          {/* Multi-word Selection Utility button */}
+          <button
+            type="button"
+            onClick={handleToggleMultiSelectMode}
+            className={`px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all min-h-[36px] flex items-center gap-1.5 shrink-0 active:scale-95 ${
+              isMultiSelectMode
+                ? 'bg-[#D4AF37] text-[#0B0B0F] border-[#D4AF37] font-bold shadow-md shadow-[#D4AF37]/20'
+                : 'bg-[#1C1C24] hover:bg-[#262632] border-[#333342] text-[#FFF8E7]/90'
+            }`}
+            title="Pick multiple individual words (tap words to add or remove)"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>Multi-word</span>
+            {isMultiSelectMode && (
+              <span className="text-[10px] px-1 py-0.2 bg-[#0B0B0F]/20 rounded font-mono font-bold">ON</span>
+            )}
+          </button>
+
+          {/* Clear Selection button */}
+          {hasSelection && (
+            <button
+              type="button"
+              onClick={handleClearSelection}
+              className="px-2.5 py-1.5 bg-[#1C1C24]/60 hover:bg-[#262632] border border-[#333342]/60 text-xs text-[#FFF8E7]/60 hover:text-white rounded-lg transition-colors min-h-[36px] shrink-0 active:scale-95 flex items-center gap-1"
+              title="Clear word selection"
+            >
+              <RotateCcw className="w-3 h-3" />
+              <span>Clear</span>
+            </button>
+          )}
+
+          {/* Range Mode / Multi-Select Guidance Badge */}
+          {isRangeMode && (
+            <span className="text-[11px] text-[#D4AF37] bg-[#D4AF37]/10 px-2 py-1 rounded-md border border-[#D4AF37]/30 whitespace-nowrap animate-pulse flex items-center gap-1 ml-auto shrink-0">
+              {rangeAnchorIndex === null
+                ? 'Step 1: Tap first word'
+                : 'Step 2: Tap last word to complete range'}
+            </span>
+          )}
+
+          {isMultiSelectMode && !isRangeMode && (
+            <span className="text-[11px] text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded-md border border-emerald-500/30 whitespace-nowrap flex items-center gap-1 ml-auto shrink-0">
+              ✓ Tap words to add / remove
+            </span>
+          )}
         </div>
 
         {/* Primary Formatting Controls Row */}
@@ -787,13 +942,13 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
             <ChevronUp className={`w-3.5 h-3.5 transition-transform ${isEffectsSheetOpen ? 'rotate-180' : ''}`} />
           </button>
 
-          {/* Style word everywhere in all designs button */}
-          {selectedTokens.length === 1 && (
+          {/* Style word(s) everywhere in all designs button */}
+          {hasSelection && (
             <button
               type="button"
               onClick={handleStyleWordEverywhere}
-              className="bg-[#D4AF37]/15 hover:bg-[#D4AF37]/30 border border-[#D4AF37]/40 text-[#D4AF37] text-xs font-bold px-2.5 py-2 rounded-xl flex items-center gap-1 min-h-[44px] transition-all whitespace-nowrap"
-              title={`Apply style of "${selectedTokens[0].text}" to all designs`}
+              className="bg-[#D4AF37]/15 hover:bg-[#D4AF37]/30 border border-[#D4AF37]/40 text-[#D4AF37] text-xs font-bold px-2.5 py-2 rounded-xl flex items-center gap-1 min-h-[44px] transition-all whitespace-nowrap shrink-0"
+              title="Apply styling of selected word(s) to all designs"
             >
               <Globe className="w-3.5 h-3.5" />
               <span>Style everywhere</span>

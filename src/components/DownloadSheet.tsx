@@ -1,35 +1,37 @@
 /**
- * Litdom Batch Studio - Download Bottom Sheet
- * Phone Gallery saving via Web Share API with 2-step user gesture activation,
- * 10-design batch sharing, press-and-hold fallback grid, and secondary ZIP download.
+ * Litdom Batch Studio - Download Modal & Sheet
+ * Exact visual match to IMG_1495 (2).pdf Pages 6, 7, 8, 9:
+ * - File Type dropdown: .png, .jpg, .jpeg, .webp, .pdf
+ * - Size row with "Edit" opening "Enter Width / Enter Height" popup (Page 8)
+ * - PDF Settings row with "Edit" opening Digital, RGB, CMYK, Flatten, Crop Marks & Bleed toggles (Page 9)
+ * - Quality options: Low, Medium, High, Limit
+ * - Page selection: Page + Page number, All, Select (with visual thumbnail picker)
+ * - True CMYK / High-res download execution
  */
 
 import React, { useState, useEffect } from 'react';
 import {
   X,
   Download,
-  FileArchive,
-  Image as ImageIcon,
-  CheckCircle2,
-  AlertCircle,
-  Loader2,
-  Share2,
-  Sparkles,
-  Smartphone,
-  ChevronRight,
+  ChevronDown,
+  Check,
+  AlertTriangle,
   RefreshCw,
+  Sliders,
+  CheckSquare,
+  Square,
 } from 'lucide-react';
-import { Project } from '../types';
+import { Project, PdfExportSettings } from '../types';
 import {
   exportSingleDesign,
   exportAllDesignsZip,
+  exportDesignsToPdf,
   exportDesignsToFiles,
   triggerDownload,
-  generateFilename,
   ExportFormat,
   ExportProgress,
-  RenderedDesignItem,
 } from '../utils/downloadEngine';
+import { getThumbnailBlob, createManagedObjectUrl } from '../utils/db';
 
 interface DownloadSheetProps {
   project: Project;
@@ -44,515 +46,485 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
   isOpen,
   onClose,
 }) => {
-  const [format, setFormat] = useState<ExportFormat>('png');
-  const [jpegQuality] = useState(0.92);
-  const [scope, setScope] = useState<'all' | 'single'>('all');
+  // File format: .png | .jpg | .jpeg | .webp | .pdf
+  const [fileType, setFileType] = useState<'.png' | '.jpg' | '.jpeg' | '.webp' | '.pdf'>('.png');
 
+  // Quality: Low (0.6) | Medium (0.85) | High (1.0) | Limit (custom target)
+  const [quality, setQuality] = useState<'low' | 'medium' | 'high' | 'limit'>('high');
+
+  // Page selection mode: 'current' | 'all' | 'custom'
+  const [pageMode, setPageMode] = useState<'current' | 'all' | 'custom'>('all');
+  const [selectedPageIndices, setSelectedPageIndices] = useState<Set<number>>(
+    new Set(Array.from({ length: project.pages.length }, (_, i) => i))
+  );
+
+  // Size editing popup (Page 8)
+  const activePage = project.pages[activePageIndex];
+  const [customWidth, setCustomWidth] = useState<number>(activePage?.width || 1080);
+  const [customHeight, setCustomHeight] = useState<number>(activePage?.height || 1920);
+  const [isSizeEditOpen, setIsSizeEditOpen] = useState(false);
+
+  // PDF Settings popup (Page 9)
+  const [isPdfSettingsOpen, setIsPdfSettingsOpen] = useState(false);
+  const [pdfSettings, setPdfSettings] = useState<PdfExportSettings>({
+    colorMode: 'digital',
+    flatten: false,
+    cropMarksAndBleed: false,
+  });
+
+  // Export State & Progress
   const [isExporting, setIsExporting] = useState(false);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [shareFeedback, setShareFeedback] = useState<string | null>(null);
 
-  // Rendered items for Gallery flow
-  const [renderedItems, setRenderedItems] = useState<RenderedDesignItem[] | null>(null);
+  // Thumbnail URLs for custom page selection modal
+  const [thumbUrls, setThumbUrls] = useState<Record<string, string>>({});
+  const [isThumbnailPickerOpen, setIsThumbnailPickerOpen] = useState(false);
 
-  // Revoke preview URLs on unmount or reset
   useEffect(() => {
-    return () => {
-      if (renderedItems) {
-        renderedItems.forEach((item) => {
-          try {
-            URL.revokeObjectURL(item.previewUrl);
-          } catch {
-            // safe fallback
+    if (activePage) {
+      setCustomWidth(activePage.width || 1080);
+      setCustomHeight(activePage.height || 1920);
+    }
+  }, [activePageIndex, activePage]);
+
+  // Load thumbnails when custom picker opens
+  useEffect(() => {
+    if (isThumbnailPickerOpen) {
+      const loadThumbs = async () => {
+        const map: Record<string, string> = {};
+        for (const p of project.pages) {
+          if (p.imageId) {
+            const blob = await getThumbnailBlob(p.imageId);
+            if (blob) {
+              map[p.id] = createManagedObjectUrl(blob);
+            }
           }
-        });
-      }
-    };
-  }, [renderedItems]);
+        }
+        setThumbUrls(map);
+      };
+      loadThumbs();
+    }
+  }, [isThumbnailPickerOpen, project.pages]);
 
   if (!isOpen) return null;
 
-  const totalPages = project.pages.length;
-  const activePage = project.pages[activePageIndex];
-
-  // Test Web Share API file-sharing support
-  const checkCanShareFiles = (files: File[]): boolean => {
-    if (typeof navigator === 'undefined') return false;
-    if (typeof navigator.share !== 'function') return false;
-    if (typeof navigator.canShare !== 'function') return false;
-    try {
-      return navigator.canShare({ files });
-    } catch {
-      return false;
+  const getQualityNumeric = () => {
+    switch (quality) {
+      case 'low': return 0.6;
+      case 'medium': return 0.85;
+      case 'high': return 1.0;
+      case 'limit': return 0.75;
     }
   };
 
-  const handleStartGalleryRender = async () => {
-    if (totalPages === 0) return;
+  const getFormatInternal = (): ExportFormat => {
+    if (fileType === '.pdf') return 'pdf';
+    if (fileType === '.jpg' || fileType === '.jpeg') return 'jpeg';
+    if (fileType === '.webp') return 'webp';
+    return 'png';
+  };
+
+  const handleExecuteDownload = async () => {
     setIsExporting(true);
     setErrorMessage(null);
-    setShareFeedback(null);
-    setRenderedItems(null);
 
-    const indexesToRender =
-      scope === 'single'
+    const pagesToExport: number[] =
+      pageMode === 'current'
         ? [activePageIndex]
-        : Array.from({ length: totalPages }, (_, i) => i);
+        : pageMode === 'all'
+        ? Array.from({ length: project.pages.length }, (_, i) => i)
+        : Array.from(selectedPageIndices).sort((a, b) => a - b);
 
-    setProgress({
-      current: 0,
-      total: indexesToRender.length,
-      statusText: `Preparing to render ${indexesToRender.length} design${
-        indexesToRender.length > 1 ? 's' : ''
-      } at full resolution…`,
-    });
-
-    try {
-      const items = await exportDesignsToFiles(
-        project,
-        indexesToRender,
-        format,
-        jpegQuality,
-        (p) => setProgress(p)
-      );
-      setRenderedItems(items);
-      setProgress(null);
-    } catch (err: any) {
-      console.error('Gallery render error:', err);
-      setErrorMessage(err.message || 'Failed to render designs for gallery.');
-    } finally {
+    if (pagesToExport.length === 0) {
+      setErrorMessage('Please select at least one page to export.');
       setIsExporting(false);
-    }
-  };
-
-  // Step 2 tap handler: triggers navigator.share strictly within the user tap event
-  const handleShareBatch = async (files: File[], label: string) => {
-    setErrorMessage(null);
-    setShareFeedback(null);
-
-    if (!checkCanShareFiles(files)) {
-      setErrorMessage(
-        'Direct file sharing is not supported on this browser. Use the press-and-hold options or ZIP download below.'
-      );
       return;
     }
 
     try {
-      await navigator.share({
-        files,
-        title: project.name,
-        text: `Litdom Batch Studio - ${files.length} design${files.length > 1 ? 's' : ''}`,
-      });
-      setShareFeedback(`Shared ${files.length} design${files.length > 1 ? 's' : ''} successfully!`);
-    } catch (err: any) {
-      if (err.name !== 'AbortError') {
-        console.error('navigator.share failed:', err);
-        setErrorMessage(
-          err.message ||
-            'Could not complete gallery save. Use the press-and-hold option or download button below.'
+      const cleanProjectName = project.name.replace(/[^a-zA-Z0-9_-]+/g, '_') || 'litdom_export';
+
+      if (fileType === '.pdf') {
+        // Multi-page or single-page PDF with settings
+        const pdfBlob = await exportDesignsToPdf(
+          project,
+          pagesToExport,
+          pdfSettings,
+          (p) => setProgress(p)
         );
+        triggerDownload(pdfBlob, `${cleanProjectName}.pdf`);
+      } else {
+        const fmt = getFormatInternal();
+        const qual = getQualityNumeric();
+        const customDim = { width: customWidth, height: customHeight };
+
+        if (pagesToExport.length === 1) {
+          // Single Image download
+          const blob = await exportSingleDesign(
+            project,
+            pagesToExport[0],
+            fmt,
+            qual,
+            customDim
+          );
+          const ext = fileType === '.jpg' ? 'jpg' : fileType === '.jpeg' ? 'jpeg' : fileType === '.webp' ? 'webp' : 'png';
+          triggerDownload(blob, `${cleanProjectName}_page_${pagesToExport[0] + 1}.${ext}`);
+        } else {
+          // Multiple Images -> ZIP
+          const zipBlob = await exportAllDesignsZip(
+            project,
+            fmt,
+            qual,
+            customDim,
+            (p) => setProgress(p)
+          );
+          triggerDownload(zipBlob, `${cleanProjectName}_batch.zip`);
+        }
       }
-    }
-  };
 
-  // Secondary Option: Direct ZIP export (saved in Downloads, not Gallery)
-  const handleExportZip = async () => {
-    if (totalPages === 0) return;
-    setIsExporting(true);
-    setErrorMessage(null);
-    setProgress({ current: 0, total: totalPages, statusText: 'Initializing export…' });
-
-    try {
-      const zipBlob = await exportAllDesignsZip(
-        project,
-        format,
-        jpegQuality,
-        (p) => setProgress(p)
-      );
-      const zipName = `${project.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-batch.zip`;
-      triggerDownload(zipBlob, zipName);
       setProgress(null);
+      setIsExporting(false);
+      onClose();
     } catch (err: any) {
-      console.error('ZIP Export error:', err);
-      setErrorMessage(err.message || 'Failed to export designs to ZIP.');
-    } finally {
+      console.error('Export error:', err);
+      setErrorMessage(err.message || 'Failed to complete export.');
       setIsExporting(false);
     }
   };
 
-  // Split items into groups of 10 for Web Share API limits
-  const createGroupsOfTen = (items: RenderedDesignItem[]) => {
-    const groups: { label: string; items: RenderedDesignItem[]; startIndex: number; endIndex: number }[] = [];
-    const chunkSize = 10;
-    for (let i = 0; i < items.length; i += chunkSize) {
-      const chunk = items.slice(i, i + chunkSize);
-      const start = i + 1;
-      const end = i + chunk.length;
-      groups.push({
-        label: items.length > 10 ? `Designs ${start}–${end}` : 'All Designs',
-        items: chunk,
-        startIndex: start,
-        endIndex: end,
-      });
-    }
-    return groups;
-  };
-
-  const itemGroups = renderedItems ? createGroupsOfTen(renderedItems) : [];
-  const canShareAny =
-    renderedItems && renderedItems.length > 0 && checkCanShareFiles([renderedItems[0].file]);
-
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="bg-[#17171C] border border-[#2D2D38] w-full max-w-lg rounded-t-3xl sm:rounded-3xl max-h-[90vh] flex flex-col shadow-2xl animate-in slide-in-from-bottom-6 duration-200">
-        {/* Header */}
-        <div className="p-4 sm:p-5 border-b border-[#262632] flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-[#D4AF37]/15 border border-[#D4AF37]/30 flex items-center justify-center">
-              <Smartphone className="w-5 h-5 text-[#D4AF37]" />
-            </div>
-            <div>
-              <h3 className="font-serif font-bold text-base text-[#FFF8E7]">
-                Save to Phone Gallery
-              </h3>
-              <p className="text-[11px] text-[#FFF8E7]/60">
-                100% original resolution with exact typography & layout
-              </p>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
+      {/* Download Card Container: matches IMG_1495 (2).pdf Page 6 & 7 */}
+      <div className="w-full max-w-sm sm:max-w-md bg-[#F4D58D] text-black rounded-3xl p-6 shadow-2xl flex flex-col gap-4 relative border-2 border-[#D4AF37]">
+        {/* Cancel Button at top */}
+        <button
+          onClick={onClose}
+          className="absolute right-4 top-4 text-black/60 hover:text-black p-1 rounded-full hover:bg-black/10 transition-colors"
+          title="Cancel"
+        >
+          <X className="w-5 h-5" />
+        </button>
+
+        {/* 1. File Type Selector Dropdown (Page 6 & 7) */}
+        <div className="flex flex-col gap-1.5 pt-2">
+          <label className="text-xs font-semibold text-black/80">File Type</label>
+          <div className="relative">
+            <select
+              value={fileType}
+              onChange={(e) => {
+                setFileType(e.target.value as any);
+                setIsSizeEditOpen(false);
+                setIsPdfSettingsOpen(false);
+              }}
+              className="w-full bg-black text-white font-bold text-sm px-4 py-3 rounded-2xl appearance-none pr-10 focus:outline-none cursor-pointer shadow-md"
+            >
+              <option value=".png">🖼️ .png</option>
+              <option value=".jpg">🖼️ .jpg</option>
+              <option value=".jpeg">🖼️ .jpeg</option>
+              <option value=".webp">🖼️ .webp</option>
+              <option value=".pdf">📄 .pdf</option>
+            </select>
+            <ChevronDown className="w-5 h-5 text-white absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+          </div>
+        </div>
+
+        {/* 2. Size or Setting Row */}
+        {fileType !== '.pdf' ? (
+          /* Image Size Row with Edit (Page 6) */
+          <div className="relative flex items-center justify-between text-xs font-medium text-black pt-1">
+            <span>
+              Size <span className="font-mono font-bold">.{customWidth}px by {customHeight}px</span>
+            </span>
+            <button
+              onClick={() => setIsSizeEditOpen(!isSizeEditOpen)}
+              className="font-bold underline text-black hover:text-amber-900"
+            >
+              Edit
+            </button>
+
+            {/* Popup on Page 8: Size Editing */}
+            {isSizeEditOpen && (
+              <div className="absolute right-0 top-6 z-20 w-52 bg-[#F4D58D] border-2 border-black rounded-2xl p-3 shadow-xl flex flex-col gap-2">
+                <div className="flex items-center justify-between text-[11px] font-bold">
+                  <span>Custom Size</span>
+                  <button onClick={() => setIsSizeEditOpen(false)} className="text-black/60">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    value={customWidth}
+                    onChange={(e) => setCustomWidth(Math.max(100, parseInt(e.target.value) || 100))}
+                    className="w-full bg-black text-white text-xs px-2 py-1.5 rounded-xl font-mono text-center"
+                    placeholder="Width"
+                  />
+                  <input
+                    type="number"
+                    value={customHeight}
+                    onChange={(e) => setCustomHeight(Math.max(100, parseInt(e.target.value) || 100))}
+                    className="w-full bg-black text-white text-xs px-2 py-1.5 rounded-xl font-mono text-center"
+                    placeholder="Height"
+                  />
+                </div>
+                <button
+                  onClick={() => setIsSizeEditOpen(false)}
+                  className="bg-black text-white font-bold text-xs py-1.5 rounded-xl hover:bg-black/80 transition-colors"
+                >
+                  Save
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          /* PDF Setting Row with Edit (Page 7) */
+          <div className="relative flex items-center justify-between text-xs font-medium text-black pt-1">
+            <span>Setting</span>
+            <button
+              onClick={() => setIsPdfSettingsOpen(!isPdfSettingsOpen)}
+              className="font-bold underline text-black hover:text-amber-900"
+            >
+              Edit
+            </button>
+
+            {/* Popup on Page 9: PDF Settings with Toggles */}
+            {isPdfSettingsOpen && (
+              <div className="absolute right-0 top-6 z-20 w-60 bg-[#D4AF37] border-2 border-black rounded-2xl p-4 shadow-2xl flex flex-col gap-2 text-white">
+                <div className="flex items-center justify-between text-xs font-bold text-black border-b border-black/20 pb-1.5">
+                  <span>PDF Settings</span>
+                  <button onClick={() => setIsPdfSettingsOpen(false)} className="text-black">
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {/* Digital / RGB / CMYK (Mutually Exclusive Rules from Brief) */}
+                <div className="flex items-center justify-between bg-black px-3 py-1.5 rounded-full text-xs">
+                  <span>Digital</span>
+                  <input
+                    type="checkbox"
+                    checked={pdfSettings.colorMode === 'digital'}
+                    onChange={() => setPdfSettings({ ...pdfSettings, colorMode: 'digital' })}
+                    className="w-4 h-4 accent-amber-400 cursor-pointer"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between bg-black px-3 py-1.5 rounded-full text-xs">
+                  <span>RGB</span>
+                  <input
+                    type="checkbox"
+                    checked={pdfSettings.colorMode === 'rgb'}
+                    onChange={() => setPdfSettings({ ...pdfSettings, colorMode: 'rgb' })}
+                    className="w-4 h-4 accent-amber-400 cursor-pointer"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between bg-black px-3 py-1.5 rounded-full text-xs">
+                  <span>CMYK</span>
+                  <input
+                    type="checkbox"
+                    checked={pdfSettings.colorMode === 'cmyk'}
+                    onChange={() => setPdfSettings({ ...pdfSettings, colorMode: 'cmyk' })}
+                    className="w-4 h-4 accent-amber-400 cursor-pointer"
+                  />
+                </div>
+
+                {/* Flatten (Independent) */}
+                <div className="flex items-center justify-between bg-black px-3 py-1.5 rounded-full text-xs">
+                  <span>Flatten</span>
+                  <input
+                    type="checkbox"
+                    checked={pdfSettings.flatten}
+                    onChange={(e) => setPdfSettings({ ...pdfSettings, flatten: e.target.checked })}
+                    className="w-4 h-4 accent-amber-400 cursor-pointer"
+                  />
+                </div>
+
+                {/* Crop Marks & Bleed (Independent) */}
+                <div className="flex items-center justify-between bg-black px-3 py-2 rounded-2xl text-xs">
+                  <span className="leading-tight">Crop Marks & Bleed</span>
+                  <input
+                    type="checkbox"
+                    checked={pdfSettings.cropMarksAndBleed}
+                    onChange={(e) => setPdfSettings({ ...pdfSettings, cropMarksAndBleed: e.target.checked })}
+                    className="w-4 h-4 accent-amber-400 cursor-pointer shrink-0 ml-2"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 3. Quality Row (Page 6: Low, Medium, High, Limit) */}
+        {fileType !== '.pdf' && (
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs font-semibold text-black/80">Quality</span>
+            <div className="grid grid-cols-4 gap-2">
+              {(['low', 'medium', 'high', 'limit'] as const).map((q) => (
+                <button
+                  key={q}
+                  onClick={() => setQuality(q)}
+                  className={`py-2 rounded-full text-xs font-bold capitalize transition-all ${
+                    quality === q
+                      ? 'bg-black text-white shadow-md'
+                      : 'bg-black/20 text-black hover:bg-black/30'
+                  }`}
+                >
+                  {q}
+                </button>
+              ))}
             </div>
           </div>
-          <button
-            onClick={onClose}
-            disabled={isExporting}
-            className="p-1.5 rounded-lg text-[#FFF8E7]/50 hover:text-white hover:bg-[#212128] transition-colors min-h-[36px] min-w-[36px] flex items-center justify-center"
-          >
-            <X className="w-5 h-5" />
-          </button>
+        )}
+
+        {/* 4. Select Page Row (Page 6 & 7: Page + Page number, All, Select) */}
+        <div className="flex flex-col gap-1.5">
+          <span className="text-xs font-semibold text-black/80">Select Page:</span>
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              onClick={() => setPageMode('current')}
+              className={`py-2 px-2 rounded-2xl text-[11px] font-bold leading-tight transition-all text-center ${
+                pageMode === 'current'
+                  ? 'bg-black text-white shadow-md'
+                  : 'bg-black/20 text-black hover:bg-black/30'
+              }`}
+            >
+              Page {activePageIndex + 1}
+            </button>
+            <button
+              onClick={() => setPageMode('all')}
+              className={`py-2 px-2 rounded-2xl text-xs font-bold transition-all text-center ${
+                pageMode === 'all'
+                  ? 'bg-black text-white shadow-md'
+                  : 'bg-black/20 text-black hover:bg-black/30'
+              }`}
+            >
+              All
+            </button>
+            <button
+              onClick={() => {
+                setPageMode('custom');
+                setIsThumbnailPickerOpen(true);
+              }}
+              className={`py-2 px-2 rounded-2xl text-xs font-bold transition-all text-center ${
+                pageMode === 'custom'
+                  ? 'bg-black text-white shadow-md'
+                  : 'bg-black/20 text-black hover:bg-black/30'
+              }`}
+            >
+              Select
+            </button>
+          </div>
+          {pageMode === 'custom' && (
+            <span className="text-[10px] text-black/70 font-semibold text-center">
+              {selectedPageIndices.size} page(s) selected for download
+            </span>
+          )}
         </div>
 
-        {/* Body */}
-        <div className="p-4 sm:p-6 space-y-4 overflow-y-auto">
-          {errorMessage && (
-            <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-xs text-red-300 flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
-              <span>{errorMessage}</span>
-            </div>
-          )}
+        {errorMessage && (
+          <div className="p-2.5 bg-red-900 text-white rounded-xl text-xs flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-red-300" />
+            <span>{errorMessage}</span>
+          </div>
+        )}
 
-          {shareFeedback && (
-            <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-xs text-emerald-300 flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-              <span>{shareFeedback}</span>
+        {/* Progress Bar when exporting */}
+        {isExporting && progress && (
+          <div className="space-y-1 bg-black/10 p-3 rounded-2xl">
+            <div className="flex items-center justify-between text-[11px] font-bold text-black">
+              <span>{progress.statusText}</span>
+              <span>
+                {progress.current}/{progress.total}
+              </span>
             </div>
-          )}
+            <div className="w-full h-2 bg-black/20 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-black rounded-full transition-all duration-300"
+                style={{ width: `${(progress.current / Math.max(1, progress.total)) * 100}%` }}
+              />
+            </div>
+          </div>
+        )}
 
-          {/* STEP 1: OPTIONS & INITIAL RENDER TRIGGER */}
-          {!renderedItems && (
+        {/* 5. Big Download Button (Pages 6 & 7) */}
+        <button
+          onClick={handleExecuteDownload}
+          disabled={isExporting}
+          className="w-full bg-black hover:bg-black/85 text-white font-bold text-sm py-3.5 rounded-full transition-all shadow-xl active:scale-95 disabled:opacity-50 flex items-center justify-center gap-2 mt-1"
+        >
+          {isExporting ? (
             <>
-              {/* Target Scope: All Designs vs Current Design */}
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-[#D4AF37] uppercase tracking-wider">
-                  Designs to Save
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setScope('all')}
-                    disabled={isExporting}
-                    className={`p-3 rounded-xl border text-left flex flex-col gap-0.5 transition-all min-h-[44px] ${
-                      scope === 'all'
-                        ? 'border-[#D4AF37] bg-[#D4AF37]/10 text-[#FFF8E7]'
-                        : 'border-[#262632] bg-[#121217] text-[#FFF8E7]/60 hover:text-[#FFF8E7]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-xs">All Designs</span>
-                      {scope === 'all' && (
-                        <CheckCircle2 className="w-3.5 h-3.5 text-[#D4AF37]" />
-                      )}
-                    </div>
-                    <span className="text-[10px] text-[#FFF8E7]/50">
-                      Entire batch ({totalPages} {totalPages === 1 ? 'design' : 'designs'})
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setScope('single')}
-                    disabled={isExporting}
-                    className={`p-3 rounded-xl border text-left flex flex-col gap-0.5 transition-all min-h-[44px] ${
-                      scope === 'single'
-                        ? 'border-[#D4AF37] bg-[#D4AF37]/10 text-[#FFF8E7]'
-                        : 'border-[#262632] bg-[#121217] text-[#FFF8E7]/60 hover:text-[#FFF8E7]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-xs truncate max-w-[120px]">
-                        Design #{activePageIndex + 1}
-                      </span>
-                      {scope === 'single' && (
-                        <CheckCircle2 className="w-3.5 h-3.5 text-[#D4AF37]" />
-                      )}
-                    </div>
-                    <span className="text-[10px] text-[#FFF8E7]/50 truncate">
-                      {activePage ? activePage.name : 'Current'}
-                    </span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Format Selector: PNG vs JPG */}
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-[#D4AF37] uppercase tracking-wider">
-                  Image Format
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setFormat('png')}
-                    disabled={isExporting}
-                    className={`p-3 rounded-xl border text-left flex flex-col gap-0.5 transition-all min-h-[44px] ${
-                      format === 'png'
-                        ? 'border-[#D4AF37] bg-[#D4AF37]/10 text-[#FFF8E7]'
-                        : 'border-[#262632] bg-[#121217] text-[#FFF8E7]/60 hover:text-[#FFF8E7]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-xs">PNG (Recommended)</span>
-                      {format === 'png' && (
-                        <CheckCircle2 className="w-3.5 h-3.5 text-[#D4AF37]" />
-                      )}
-                    </div>
-                    <span className="text-[10px] text-[#FFF8E7]/50">
-                      Lossless & crispest typography
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setFormat('jpeg')}
-                    disabled={isExporting}
-                    className={`p-3 rounded-xl border text-left flex flex-col gap-0.5 transition-all min-h-[44px] ${
-                      format === 'jpeg'
-                        ? 'border-[#D4AF37] bg-[#D4AF37]/10 text-[#FFF8E7]'
-                        : 'border-[#262632] bg-[#121217] text-[#FFF8E7]/60 hover:text-[#FFF8E7]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-xs">JPG</span>
-                      {format === 'jpeg' && (
-                        <CheckCircle2 className="w-3.5 h-3.5 text-[#D4AF37]" />
-                      )}
-                    </div>
-                    <span className="text-[10px] text-[#FFF8E7]/50">Smaller file size</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Progress Indicator */}
-              {progress && (
-                <div className="bg-[#121217] border border-[#2D2D3A] rounded-2xl p-4 space-y-2">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-semibold text-[#D4AF37] flex items-center gap-1.5">
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      {progress.statusText}
-                    </span>
-                    <span className="font-mono text-[#FFF8E7]/70">
-                      {Math.round((progress.current / progress.total) * 100)}%
-                    </span>
-                  </div>
-                  <div className="w-full h-2 bg-[#21212A] rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-gradient-to-r from-[#D4AF37] to-[#F4D58D] transition-all duration-200"
-                      style={{
-                        width: `${Math.round((progress.current / progress.total) * 100)}%`,
-                      }}
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* Primary Action Button: "Save to gallery" */}
-              <div className="space-y-2 pt-2">
-                <button
-                  type="button"
-                  onClick={handleStartGalleryRender}
-                  disabled={isExporting || totalPages === 0}
-                  className="w-full bg-gradient-to-r from-[#D4AF37] to-[#F4D58D] hover:from-[#F4D58D] hover:to-[#D4AF37] text-[#0B0B0F] font-bold text-sm py-3.5 px-4 rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-[#D4AF37]/20 transition-all min-h-[50px] active:scale-[0.99] disabled:opacity-50"
-                >
-                  <Smartphone className="w-4 h-4" />
-                  <span>
-                    Save to gallery ({scope === 'all' ? `${totalPages} designs` : '1 design'})
-                  </span>
-                </button>
-                <p className="text-[10px] text-center text-[#FFF8E7]/50 leading-relaxed">
-                  Renders first at exact native resolution ({activePage?.width || 1000}×
-                  {activePage?.height || 1000}px), then prompts you to tap and save directly to your
-                  phone's photo gallery.
-                </p>
-
-                {/* Secondary Option: ZIP (saved in Downloads, not Gallery) */}
-                <div className="pt-3 border-t border-[#262632]/80">
-                  <button
-                    type="button"
-                    onClick={handleExportZip}
-                    disabled={isExporting || totalPages === 0}
-                    className="w-full bg-[#1C1C24] hover:bg-[#262632] border border-[#333342] text-[#FFF8E7]/80 hover:text-white text-xs font-semibold py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-all min-h-[44px] disabled:opacity-50"
-                  >
-                    <FileArchive className="w-4 h-4 text-[#D4AF37]" />
-                    <span>ZIP (saved in Downloads, not Gallery)</span>
-                  </button>
-                </div>
-              </div>
+              <RefreshCw className="w-4 h-4 animate-spin text-amber-400" />
+              <span>Generating Export…</span>
+            </>
+          ) : (
+            <>
+              <Download className="w-4 h-4 text-amber-400" />
+              <span>Download</span>
             </>
           )}
-
-          {/* STEP 2: FINISHED RENDERING - TAP TO SAVE TO GALLERY */}
-          {renderedItems && (
-            <div className="space-y-4 animate-in fade-in duration-200">
-              <div className="p-3.5 bg-emerald-500/10 border border-emerald-500/25 rounded-2xl flex items-center gap-3">
-                <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
-                <div>
-                  <div className="text-xs font-bold text-[#FFF8E7]">
-                    {renderedItems.length} {renderedItems.length > 1 ? 'Designs' : 'Design'} Rendered at Full Resolution
-                  </div>
-                  <div className="text-[10px] text-emerald-300/80">
-                    Exact resolution ({renderedItems[0].page.width}×{renderedItems[0].page.height}px)
-                  </div>
-                </div>
-              </div>
-
-              {/* Tap to save button(s) - split in groups of 10 if large batch */}
-              {canShareAny ? (
-                <div className="space-y-2">
-                  <div className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider">
-                    Step 2: Tap to Save to Gallery
-                  </div>
-
-                  {itemGroups.map((group, gIdx) => (
-                    <button
-                      key={gIdx}
-                      type="button"
-                      onClick={() =>
-                        handleShareBatch(
-                          group.items.map((i) => i.file),
-                          group.label
-                        )
-                      }
-                      className="w-full bg-gradient-to-r from-[#D4AF37] to-[#F4D58D] hover:from-[#F4D58D] hover:to-[#D4AF37] text-[#0B0B0F] font-bold text-sm py-3.5 px-4 rounded-xl flex items-center justify-between shadow-lg shadow-[#D4AF37]/20 transition-all min-h-[50px] active:scale-[0.99]"
-                    >
-                      <div className="flex items-center gap-2">
-                        <Share2 className="w-4 h-4" />
-                        <span>Tap to save {group.label} to Gallery</span>
-                      </div>
-                      <ChevronRight className="w-4 h-4" />
-                    </button>
-                  ))}
-
-                  <p className="text-[10px] text-[#FFF8E7]/50 text-center leading-relaxed">
-                    💡 When prompted, select <strong>Save to Photos</strong>, <strong>Save Image</strong>, or your device gallery.
-                  </p>
-                </div>
-              ) : (
-                <div className="p-3 bg-[#1C1C24] border border-[#333342] rounded-xl text-xs text-[#FFF8E7]/70 space-y-1">
-                  <span className="font-bold text-[#D4AF37] block">
-                    Direct Gallery Sharing Note
-                  </span>
-                  <span>
-                    Your current browser session doesn't allow one-tap gallery sharing. Use the
-                    press-and-hold instructions or direct download buttons below.
-                  </span>
-                </div>
-              )}
-
-              {/* Fallback Grid: Press and hold an image, then Save image */}
-              <div className="space-y-2 pt-2 border-t border-[#262632]">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider">
-                    Gallery Fallback: Press & Hold
-                  </span>
-                  <span className="text-[10px] text-[#FFF8E7]/40">
-                    Works on all phones
-                  </span>
-                </div>
-
-                <div className="p-2.5 bg-[#121217] rounded-xl border border-[#262632] text-[11px] text-[#FFF8E7]/70 leading-relaxed">
-                  📱 <strong>Tip for mobile:</strong> Press and hold any image below, then tap{' '}
-                  <span className="text-[#D4AF37] font-semibold">"Save image"</span> or{' '}
-                  <span className="text-[#D4AF37] font-semibold">"Add to Photos"</span> to save it
-                  directly to your gallery.
-                </div>
-
-                <div className="grid grid-cols-2 gap-2.5 max-h-56 overflow-y-auto p-1">
-                  {renderedItems.map((item) => (
-                    <div
-                      key={item.pageIndex}
-                      className="bg-[#121217] border border-[#2D2D38] rounded-xl p-2 flex flex-col items-center gap-2 text-center"
-                    >
-                      <img
-                        src={item.previewUrl}
-                        alt={item.page.name}
-                        className="w-full h-28 object-contain rounded-lg bg-[#0B0B0F]"
-                      />
-                      <div className="w-full min-w-0">
-                        <div className="text-[10px] font-mono text-[#D4AF37] font-bold truncate">
-                          #{item.pageIndex + 1} {item.page.name}
-                        </div>
-                        <div className="text-[9px] text-[#FFF8E7]/40 font-mono">
-                          {item.page.width}×{item.page.height}px
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => triggerDownload(item.blob, item.filename)}
-                        className="w-full py-1.5 px-2 bg-[#21212A] hover:bg-[#2B2B38] text-[10px] font-semibold text-[#FFF8E7] rounded-lg border border-[#333342] flex items-center justify-center gap-1 transition-colors min-h-[32px]"
-                      >
-                        <Download className="w-3 h-3 text-[#D4AF37]" />
-                        <span>Download</span>
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Reset / Render Again & Secondary ZIP */}
-              <div className="flex items-center gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRenderedItems(null);
-                    setShareFeedback(null);
-                  }}
-                  className="flex-1 py-2.5 px-3 bg-[#1C1C24] hover:bg-[#262632] border border-[#333342] text-xs font-semibold text-[#FFF8E7]/80 hover:text-white rounded-xl flex items-center justify-center gap-1.5 transition-colors min-h-[40px]"
-                >
-                  <RefreshCw className="w-3.5 h-3.5 text-[#D4AF37]" />
-                  <span>Render Again</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleExportZip}
-                  className="flex-1 py-2.5 px-3 bg-[#1C1C24] hover:bg-[#262632] border border-[#333342] text-xs font-semibold text-[#FFF8E7]/80 hover:text-white rounded-xl flex items-center justify-center gap-1.5 transition-colors min-h-[40px]"
-                >
-                  <FileArchive className="w-3.5 h-3.5 text-[#D4AF37]" />
-                  <span>ZIP (in Downloads)</span>
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="p-4 border-t border-[#262632] flex items-center justify-end">
-          <button
-            onClick={onClose}
-            disabled={isExporting}
-            className="text-xs text-[#FFF8E7]/60 hover:text-[#FFF8E7] px-4 py-2 min-h-[36px]"
-          >
-            Close
-          </button>
-        </div>
+        </button>
       </div>
+
+      {/* Custom Page Thumbnail Selector Modal */}
+      {isThumbnailPickerOpen && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+          <div className="w-full max-w-md bg-[#16161D] text-[#FFF8E7] rounded-3xl p-5 border border-[#D4AF37] shadow-2xl flex flex-col gap-4 max-h-[85vh]">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <h3 className="font-bold text-sm text-[#FFF8E7]">Select Pages to Export</h3>
+              <button onClick={() => setIsThumbnailPickerOpen(false)} className="text-white/60 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3 overflow-y-auto p-1">
+              {project.pages.map((p, idx) => {
+                const isSelected = selectedPageIndices.has(idx);
+                const thumb = thumbUrls[p.id];
+
+                return (
+                  <div
+                    key={p.id}
+                    onClick={() => {
+                      const next = new Set(selectedPageIndices);
+                      if (isSelected) next.delete(idx);
+                      else next.add(idx);
+                      setSelectedPageIndices(next);
+                    }}
+                    className={`cursor-pointer rounded-2xl overflow-hidden border-2 transition-all p-1.5 flex flex-col items-center gap-1.5 ${
+                      isSelected ? 'border-[#D4AF37] bg-[#D4AF37]/20 shadow-lg' : 'border-white/10 hover:border-white/30'
+                    }`}
+                  >
+                    <div className="aspect-[3/4] w-full bg-black/40 rounded-xl overflow-hidden flex items-center justify-center">
+                      {thumb ? (
+                        <img src={thumb} alt={p.name} className="w-full h-full object-cover" />
+                      ) : (
+                        <span className="text-[10px] text-white/40">Page {idx + 1}</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1 text-[11px] font-semibold">
+                      {isSelected ? (
+                        <CheckSquare className="w-3.5 h-3.5 text-[#D4AF37]" />
+                      ) : (
+                        <Square className="w-3.5 h-3.5 text-white/40" />
+                      )}
+                      <span>Page {idx + 1}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <button
+              onClick={() => setIsThumbnailPickerOpen(false)}
+              className="w-full bg-[#D4AF37] text-black font-bold text-xs py-2.5 rounded-xl hover:bg-[#F4D58D]"
+            >
+              Done ({selectedPageIndices.size} Selected)
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

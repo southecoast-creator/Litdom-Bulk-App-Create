@@ -268,10 +268,10 @@ export function computeTextBoxLayout(
   targetH: number
 ): ComputedLayoutResult {
   const scale = targetW / 1000;
-  const boxX = (box.x / 100) * targetW;
-  const boxY = (box.y / 100) * targetH;
-  const boxW = (box.width / 100) * targetW;
-  const scaledPadding = (box.padding || 0) * scale;
+  const boxX = Math.round((box.x / 100) * targetW);
+  const boxY = Math.round((box.y / 100) * targetH);
+  const boxW = Math.round((box.width / 100) * targetW);
+  const scaledPadding = Math.round((box.padding || 0) * scale);
   const innerW = Math.max(10, boxW - scaledPadding * 2);
 
   // Determine runs: check richValues first, else values, else fieldLabel
@@ -301,12 +301,12 @@ export function computeTextBoxLayout(
       endIdx--;
     }
 
-    const lineHeightPx = currentMaxFontSize * (box.lineHeight || 1.3);
+    const lineHeightPx = Math.round(currentMaxFontSize * (box.lineHeight || 1.3));
     lines.push({
       tokens: [...currentTokens],
-      width: Math.max(0, trimmedWidth),
+      width: Math.round(Math.max(0, trimmedWidth)),
       height: lineHeightPx,
-      maxFontSize: currentMaxFontSize,
+      maxFontSize: Math.round(currentMaxFontSize),
     });
 
     currentTokens = [];
@@ -374,7 +374,9 @@ export function computeTextBoxLayout(
     }
   }
 
-  const computedHeightPx = Math.max(16 * scale, totalLinesHeight + scaledPadding * 2 + extraEffectPaddingBottom);
+  const computedHeightPx = Math.round(
+    Math.max(16 * scale, totalLinesHeight + scaledPadding * 2 + extraEffectPaddingBottom)
+  );
   const computedHeightPercent = (computedHeightPx / targetH) * 100;
 
   return {
@@ -832,11 +834,15 @@ export interface RenderCanvasOptions {
   selectedBoxId?: string | null;
   targetWidth?: number; // Screen-res preview width
   targetHeight?: number;
+  dpr?: number; // Optional explicit DPR multiplier (defaults to window.devicePixelRatio)
+  isExport?: boolean; // When true, dpr is locked to 1 for exact native file export
 }
 
 /**
  * Shared Canvas Renderer: renders design to an HTMLCanvasElement
- * Automatically computes height to fit text, and renders mixed runs with effects.
+ * - High-Density (Retina) Canvas Buffer Scaling (window.devicePixelRatio)
+ * - Hardware Acceleration & Sub-pixel Antialiasing
+ * - Integer Pixel Snapping for crystal-clear text and element edges
  */
 export async function renderDesignToCanvas(
   canvas: HTMLCanvasElement,
@@ -857,32 +863,53 @@ export async function renderDesignToCanvas(
   const nativeW = page.width || img.naturalWidth || 1000;
   const nativeH = page.height || img.naturalHeight || 1000;
 
-  const targetW = options.targetWidth || nativeW;
-  const targetH = options.targetHeight || Math.round(targetW * (nativeH / nativeW));
+  // 1. Integer-snapped layout dimensions
+  const targetW = Math.round(options.targetWidth || nativeW);
+  const targetH = Math.round(options.targetHeight || Math.round(targetW * (nativeH / nativeW)));
 
-  if (canvas.width !== targetW || canvas.height !== targetH) {
-    canvas.width = targetW;
-    canvas.height = targetH;
+  // 2. High-Density (Retina) Buffer Scaling:
+  // Scale HTML5 canvas drawing buffers dynamically by window.devicePixelRatio
+  const dpr = options.isExport
+    ? 1
+    : (options.dpr ?? (typeof window !== 'undefined' ? Math.max(1, window.devicePixelRatio || 1) : 1));
+
+  const bufferW = Math.round(targetW * dpr);
+  const bufferH = Math.round(targetH * dpr);
+
+  if (canvas.width !== bufferW || canvas.height !== bufferH) {
+    canvas.width = bufferW;
+    canvas.height = bufferH;
   }
+
+  // Constrain CSS display size to match layout dimensions
+  canvas.style.width = `${targetW}px`;
+  canvas.style.height = `${targetH}px`;
 
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('Could not obtain 2D canvas context');
 
+  // Apply context scaling (ctx.scale(dpr, dpr) via setTransform) to normalize coordinate systems and eliminate pixelation
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // Sub-pixel antialiasing & image smoothing
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
   ctx.clearRect(0, 0, targetW, targetH);
 
-  // 1. Draw Background Image
+  // 3. Draw Background Image with integer bounds
   ctx.drawImage(img, 0, 0, targetW, targetH);
 
   const scale = targetW / 1000;
 
-  // 2. Render Text Boxes with Automatic Height Fitting
+  // 4. Render Text Boxes with Automatic Height Fitting and Integer Pixel Snapping
   for (const box of boxesToRender) {
     const layout = computeTextBoxLayout(ctx, box, page, targetW, targetH);
     const { lines, boxX, boxY, boxW, computedHeightPx, scaledPadding } = layout;
 
     ctx.save();
 
-    // Optional Box Fill
+    // Optional Box Fill (snapped to integer pixels)
     if (box.fill && box.fill.opacity > 0) {
       ctx.fillStyle = box.fill.color;
       ctx.globalAlpha = box.fill.opacity;
@@ -895,26 +922,26 @@ export async function renderDesignToCanvas(
 
     for (const line of lines) {
       // Baseline calculation within the line height
-      const baselineY = currentY + line.maxFontSize;
+      const baselineY = Math.round(currentY + line.maxFontSize);
 
-      // Horizontal Alignment
-      let lineStartX = boxX + scaledPadding;
+      // Horizontal Alignment snapped to integer pixels
+      let lineStartX = Math.round(boxX + scaledPadding);
       if (box.textAlign === 'center') {
-        lineStartX = boxX + (boxW - line.width) / 2;
+        lineStartX = Math.round(boxX + (boxW - line.width) / 2);
       } else if (box.textAlign === 'right') {
-        lineStartX = boxX + boxW - scaledPadding - line.width;
+        lineStartX = Math.round(boxX + boxW - scaledPadding - line.width);
       }
 
       let tokenX = lineStartX;
 
       for (const token of line.tokens) {
         if (token.isWhitespace && token.text.trim() === '') {
-          tokenX += token.width;
+          tokenX += Math.round(token.width);
           continue;
         }
 
-        drawStyledTokenWithEffects(ctx, token, tokenX, baselineY, scale, box);
-        tokenX += token.width;
+        drawStyledTokenWithEffects(ctx, token, Math.round(tokenX), baselineY, scale, box);
+        tokenX += Math.round(token.width);
       }
 
       currentY += line.height;
@@ -922,7 +949,7 @@ export async function renderDesignToCanvas(
 
     ctx.restore();
 
-    // 3. Optional Selection Outline: Strictly fits computed text size
+    // 5. Optional Selection Outline: Strictly fits computed text size with integer coordinates
     if (options.showBoundingBoxes) {
       const isSelected = options.selectedBoxId === box.id;
       ctx.save();
@@ -932,7 +959,7 @@ export async function renderDesignToCanvas(
         ctx.setLineDash([4, 4]);
       }
 
-      // Draw bounding box matching real computed height
+      // Draw bounding box matching real computed height (integer snapped)
       ctx.strokeRect(boxX, boxY, boxW, computedHeightPx);
 
       if (isSelected) {
@@ -946,15 +973,33 @@ export async function renderDesignToCanvas(
           ctx.strokeStyle = '#D4AF37';
           ctx.lineWidth = 2.5;
           ctx.beginPath();
-          ctx.arc(hx, hy, handleRadius, 0, Math.PI * 2);
+          ctx.arc(Math.round(hx), Math.round(hy), handleRadius, 0, Math.PI * 2);
           ctx.fill();
           ctx.stroke();
           ctx.restore();
         };
 
-        // Left and Right width handles (automatic height: top/bottom handles removed!)
-        drawHandle(boxX, boxY + computedHeightPx / 2); // W
-        drawHandle(boxX + boxW, boxY + computedHeightPx / 2); // E
+        const drawPillHandle = (px: number, py: number, isVertical: boolean) => {
+          ctx.save();
+          ctx.shadowColor = 'rgba(0,0,0,0.5)';
+          ctx.shadowBlur = 3;
+          ctx.fillStyle = '#FFFFFF';
+          ctx.strokeStyle = '#D4AF37';
+          ctx.lineWidth = 1.5;
+          const pw = Math.round(isVertical ? 6 * scale : 18 * scale);
+          const ph = Math.round(isVertical ? 18 * scale : 6 * scale);
+          ctx.beginPath();
+          ctx.roundRect(Math.round(px - pw / 2), Math.round(py - ph / 2), pw, ph, 3);
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+        };
+
+        // 4 Edge Midpoint Pill Handles (IMG_1495 (2).pdf Page 11)
+        drawPillHandle(boxX, boxY + Math.round(computedHeightPx / 2), true); // W
+        drawPillHandle(boxX + boxW, boxY + Math.round(computedHeightPx / 2), true); // E
+        drawPillHandle(boxX + Math.round(boxW / 2), boxY, false); // N
+        drawPillHandle(boxX + Math.round(boxW / 2), boxY + computedHeightPx, false); // S
 
         // 4 Corner handles for width & position adjustment
         drawHandle(boxX, boxY); // NW
@@ -962,13 +1007,13 @@ export async function renderDesignToCanvas(
         drawHandle(boxX + boxW, boxY + computedHeightPx); // SE
         drawHandle(boxX, boxY + computedHeightPx); // SW
 
-        // Floating field badge
+        // Floating field badge (integer snapped)
         const badgeText = `${box.fieldLabel} (${box.width}%)`;
         ctx.font = `600 ${Math.max(10, Math.round(11 * scale))}px "Plus Jakarta Sans", sans-serif`;
-        const badgeW = ctx.measureText(badgeText).width + 12;
-        const badgeH = Math.max(16, Math.round(18 * scale));
+        const badgeW = Math.round(ctx.measureText(badgeText).width + 12);
+        const badgeH = Math.round(Math.max(16, Math.round(18 * scale)));
         const badgeX = boxX;
-        const badgeY = Math.max(0, boxY - badgeH - 4);
+        const badgeY = Math.round(Math.max(0, boxY - badgeH - 4));
 
         ctx.fillStyle = '#17171C';
         ctx.strokeStyle = '#D4AF37';
@@ -980,7 +1025,7 @@ export async function renderDesignToCanvas(
 
         ctx.fillStyle = '#D4AF37';
         ctx.textBaseline = 'middle';
-        ctx.fillText(badgeText, badgeX + 6, badgeY + badgeH / 2);
+        ctx.fillText(badgeText, badgeX + 6, Math.round(badgeY + badgeH / 2));
       }
       ctx.restore();
     }

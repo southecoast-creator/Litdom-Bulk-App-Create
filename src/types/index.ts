@@ -17,6 +17,8 @@ export interface EffectItemSettings {
   offsetY?: number;
   width?: number;
   strength?: number;
+  strokeWidth?: number;
+  strokeColor?: string;
 }
 
 export interface TextRunEffect {
@@ -96,6 +98,7 @@ export interface TextBoxTemplate {
     color: string;
     opacity: number;
   };
+  effects?: TextRunEffect;
 }
 
 export interface DesignPage {
@@ -159,6 +162,96 @@ export interface StorageBreakdown {
   projectsBytes: number;
   totalBytes: number;
   projectSizes: Record<string, number>;
+}
+
+export interface SavedTemplate {
+  id: string;
+  name: string;
+  createdAt: number;
+  imageId: string;
+  width: number;
+  height: number;
+  template: TextBoxTemplate[];
+}
+
+export const DOCX_STANDARD_STYLES = [
+  'Title',
+  'Subtitle',
+  'Heading 1',
+  'Heading 2',
+  'Heading 3',
+  'Heading 4',
+  'Heading 5',
+  'Heading 6',
+  'Heading 7',
+  'Heading 8',
+  'Heading 9',
+  'Normal Text',
+  'Quote',
+  'Intense Quote',
+  'Block Text',
+  'Body Text',
+  'Body Text 2',
+  'Body Text 3',
+  'Body Text First Indent',
+  'Body Text Indent',
+  'Caption',
+  'Book Title',
+  'List Paragraph',
+  'List Number',
+  'List Bullet',
+  'Note Heading',
+  'Plain Text',
+] as const;
+
+export type DocxStyleCategory = (typeof DOCX_STANDARD_STYLES)[number] | string;
+
+export interface DocxBlock {
+  style: DocxStyleCategory;
+  text: string;
+  isBold?: boolean;
+  isItalic?: boolean;
+  isUnderline?: boolean;
+}
+
+export interface DocxPageScan {
+  pageNumber: number;
+  blocks: DocxBlock[];
+  occurrences: Record<string, string[]>; // style -> array of consecutive grouped text blocks
+}
+
+export interface DocxScanResult {
+  filename: string;
+  pages: DocxPageScan[];
+  detectedStyles: string[];
+  maxOccurrences: Record<string, number>;
+  generatedColumns: string[];
+  spreadsheetData: Record<string, string>[];
+}
+
+export type DocxWorkflowStage =
+  | 'idle'
+  | 'scanning'
+  | 'scanned'
+  | 'templates_needed'
+  | 'revised_sheet_needed'
+  | 'validating'
+  | 'placeholders_ready'
+  | 'populated';
+
+export interface PdfExportSettings {
+  colorMode: 'digital' | 'rgb' | 'cmyk';
+  flatten: boolean;
+  cropMarksAndBleed: boolean;
+}
+
+export interface FontCombination {
+  id: string;
+  name: string;
+  headingFont: string;
+  bodyFont: string;
+  accentFont?: string;
+  description: string;
 }
 
 
