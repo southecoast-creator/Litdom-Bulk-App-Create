@@ -37,6 +37,7 @@ import {
   createDefaultTemplate,
   calculateExactStorageBreakdown,
   storeImageFile,
+  isImageFile,
   formatBytes,
   saveSavedTemplate,
   getAllSavedTemplates,
@@ -137,8 +138,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
 
   // 1. Image Workflow: Single or Bulk Images Upload
   const handleImagesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+    const picked = e.target.files;
+    if (!picked || picked.length === 0) return;
+    // Copy before resetting the input, which empties the live FileList
+    const files = Array.from(picked);
+    e.target.value = '';
 
     setLoading(true);
     const pages: any[] = [];
@@ -146,7 +150,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      if (!file.type.startsWith('image/')) continue;
+      if (!isImageFile(file)) continue;
       try {
         const stored = await storeImageFile(file);
         pages.push({
@@ -168,6 +172,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
 
     if (pages.length === 0) {
       setLoading(false);
+      alert('Could not read that image. Please choose a JPG or PNG.');
       return;
     }
 

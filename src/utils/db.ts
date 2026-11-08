@@ -264,9 +264,41 @@ export async function createResizedImageBlob(
  * - previewBlob: ~1200px wide for high-speed buttery editing
  * - thumbnailBlob: ~240px for thumbnail carousel
  */
+const IMAGE_EXT_MIME: Record<string, string> = {
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+  gif: 'image/gif',
+  bmp: 'image/bmp',
+  avif: 'image/avif',
+};
+
+function inferImageMime(file: File | Blob): string {
+  if (file.type && file.type.startsWith('image/')) return file.type;
+  const name = (file as File).name || '';
+  const ext = name.split('.').pop()?.toLowerCase() || '';
+  return IMAGE_EXT_MIME[ext] || '';
+}
+
+/**
+ * Android file pickers (Google Photos, Files, some cloud providers) often hand
+ * back files with an EMPTY `type`. Treat a file as an image if either its MIME
+ * type OR its file extension says so.
+ */
+export function isImageFile(file: File | Blob): boolean {
+  return inferImageMime(file) !== '';
+}
+
 export async function storeImageFile(
-  fileOrBlob: File | Blob
+  inputFileOrBlob: File | Blob
 ): Promise<{ imageId: string; width: number; height: number; thumbnailBlob: Blob }> {
+  // Re-wrap with a real MIME type when the picker left it empty
+  const mime = inferImageMime(inputFileOrBlob);
+  const fileOrBlob: File | Blob =
+    mime && inputFileOrBlob.type !== mime
+      ? new Blob([inputFileOrBlob], { type: mime })
+      : inputFileOrBlob;
   const db = await getDB();
   const imageId = `img_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
