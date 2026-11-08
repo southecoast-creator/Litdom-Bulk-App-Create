@@ -274,6 +274,50 @@ export function computeTextBoxLayout(
   const scaledPadding = Math.round((box.padding || 0) * scale);
   const innerW = Math.max(10, boxW - scaledPadding * 2);
 
+  // If this element is a Shape, Table, Line, or Image Overlay, return dedicated layout
+  if (box.elementType === 'shape' || box.elementType === 'image_overlay') {
+    const computedHeightPx = box.height !== undefined
+      ? Math.round((box.height / 100) * targetH)
+      : Math.round(boxW * (targetW / targetH));
+    return {
+      lines: [],
+      computedHeightPx: Math.max(16, computedHeightPx),
+      computedHeightPercent: (computedHeightPx / targetH) * 100,
+      boxX,
+      boxY,
+      boxW,
+      scaledPadding: 0,
+    };
+  }
+
+  if (box.elementType === 'line') {
+    const computedHeightPx = Math.max(16, Math.round(20 * scale));
+    return {
+      lines: [],
+      computedHeightPx,
+      computedHeightPercent: (computedHeightPx / targetH) * 100,
+      boxX,
+      boxY,
+      boxW,
+      scaledPadding: 0,
+    };
+  }
+
+  if (box.elementType === 'table') {
+    const computedHeightPx = box.height !== undefined
+      ? Math.round((box.height / 100) * targetH)
+      : Math.round(Math.max(120 * scale, targetH * 0.22));
+    return {
+      lines: [],
+      computedHeightPx,
+      computedHeightPercent: (computedHeightPx / targetH) * 100,
+      boxX,
+      boxY,
+      boxW,
+      scaledPadding: 0,
+    };
+  }
+
   // Determine runs: check richValues first, else values, else fieldLabel
   let runs: TextRun[] = [];
   if (page?.richValues && page.richValues[box.fieldLabel] && page.richValues[box.fieldLabel].length > 0) {
@@ -829,6 +873,169 @@ function drawStyledTokenWithEffects(
   ctx.restore();
 }
 
+/**
+ * Draw Geometric Shape (Rectangle, Square, Circle, Triangle, Star)
+ */
+export function drawShape(
+  ctx: CanvasRenderingContext2D,
+  shapeType: string,
+  boxX: number,
+  boxY: number,
+  boxW: number,
+  boxH: number,
+  fillColor: string,
+  strokeColor?: string,
+  strokeWidth?: number
+) {
+  ctx.save();
+  ctx.fillStyle = fillColor || '#000000';
+  if (strokeColor && strokeWidth && strokeWidth > 0) {
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = strokeWidth;
+  }
+  const cx = boxX + boxW / 2;
+  const cy = boxY + boxH / 2;
+
+  ctx.beginPath();
+  switch (shapeType) {
+    case 'square': {
+      const side = Math.min(boxW, boxH);
+      const sx = cx - side / 2;
+      const sy = cy - side / 2;
+      ctx.rect(sx, sy, side, side);
+      break;
+    }
+    case 'circle': {
+      const r = Math.min(boxW, boxH) / 2;
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      break;
+    }
+    case 'triangle': {
+      ctx.moveTo(cx, boxY);
+      ctx.lineTo(boxX + boxW, boxY + boxH);
+      ctx.lineTo(boxX, boxY + boxH);
+      ctx.closePath();
+      break;
+    }
+    case 'star': {
+      const outerR = Math.min(boxW, boxH) / 2;
+      const innerR = outerR * 0.45;
+      const spikes = 5;
+      let rot = (Math.PI / 2) * 3;
+      const step = Math.PI / spikes;
+      ctx.moveTo(cx, cy - outerR);
+      for (let i = 0; i < spikes; i++) {
+        let x = cx + Math.cos(rot) * outerR;
+        let y = cy + Math.sin(rot) * outerR;
+        ctx.lineTo(x, y);
+        rot += step;
+        x = cx + Math.cos(rot) * innerR;
+        y = cy + Math.sin(rot) * innerR;
+        ctx.lineTo(x, y);
+        rot += step;
+      }
+      ctx.closePath();
+      break;
+    }
+    case 'rectangle':
+    default: {
+      ctx.rect(boxX, boxY, boxW, boxH);
+      break;
+    }
+  }
+  ctx.fill();
+  if (strokeColor && strokeWidth && strokeWidth > 0) {
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/**
+ * Draw Horizontal Divider Line
+ */
+export function drawHorizontalLine(
+  ctx: CanvasRenderingContext2D,
+  boxX: number,
+  boxY: number,
+  boxW: number,
+  boxH: number,
+  color: string,
+  lineWidth: number
+) {
+  ctx.save();
+  ctx.strokeStyle = color || '#000000';
+  ctx.lineWidth = lineWidth;
+  ctx.lineCap = 'round';
+  const midY = boxY + boxH / 2;
+  ctx.beginPath();
+  ctx.moveTo(boxX, midY);
+  ctx.lineTo(boxX + boxW, midY);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * Draw Structured Table
+ */
+export function drawTable(
+  ctx: CanvasRenderingContext2D,
+  box: TextBoxTemplate,
+  boxX: number,
+  boxY: number,
+  boxW: number,
+  boxH: number,
+  scale: number
+) {
+  const rows = box.tableRows || 3;
+  const cols = box.tableCols || 3;
+  const cellW = boxW / cols;
+  const cellH = boxH / rows;
+  const data = box.tableData || [
+    ['Header 1', 'Header 2', 'Header 3'],
+    ['Row 1, Col 1', 'Row 1, Col 2', 'Row 1, Col 3'],
+    ['Row 2, Col 1', 'Row 2, Col 2', 'Row 2, Col 3'],
+  ];
+
+  ctx.save();
+  ctx.fillStyle = box.fillColor || 'rgba(0, 0, 0, 0.45)';
+  ctx.fillRect(boxX, boxY, boxW, boxH);
+
+  ctx.strokeStyle = box.strokeColor || '#D4AF37';
+  ctx.lineWidth = Math.max(1, Math.round(1.5 * scale));
+  ctx.strokeRect(boxX, boxY, boxW, boxH);
+
+  for (let c = 1; c < cols; c++) {
+    const x = boxX + c * cellW;
+    ctx.beginPath();
+    ctx.moveTo(x, boxY);
+    ctx.lineTo(x, boxY + boxH);
+    ctx.stroke();
+  }
+  for (let r = 1; r < rows; r++) {
+    const y = boxY + r * cellH;
+    ctx.beginPath();
+    ctx.moveTo(boxX, y);
+    ctx.lineTo(boxX + boxW, y);
+    ctx.stroke();
+  }
+
+  const fontSize = Math.max(9, Math.round((box.fontSize || 14) * scale));
+  ctx.font = `600 ${fontSize}px "${box.fontFamily || 'Plus Jakarta Sans'}", sans-serif`;
+  ctx.fillStyle = box.color || '#FFF8E7';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const cellText = data[r]?.[c] || `Cell ${r + 1},${c + 1}`;
+      const cx = boxX + c * cellW + cellW / 2;
+      const cy = boxY + r * cellH + cellH / 2;
+      ctx.fillText(cellText, cx, cy);
+    }
+  }
+  ctx.restore();
+}
+
 export interface RenderCanvasOptions {
   showBoundingBoxes?: boolean;
   selectedBoxId?: string | null;
@@ -902,54 +1109,95 @@ export async function renderDesignToCanvas(
 
   const scale = targetW / 1000;
 
-  // 4. Render Text Boxes with Automatic Height Fitting and Integer Pixel Snapping
+  // 4. Render Elements (Text, Shapes, Tables, Lines, Overlays) with Integer Pixel Snapping
   for (const box of boxesToRender) {
     const layout = computeTextBoxLayout(ctx, box, page, targetW, targetH);
     const { lines, boxX, boxY, boxW, computedHeightPx, scaledPadding } = layout;
 
-    ctx.save();
+    const cx = Math.round(boxX + boxW / 2);
+    const cy = Math.round(boxY + computedHeightPx / 2);
+    const hasRotation = typeof box.rotation === 'number' && box.rotation !== 0;
 
-    // Optional Box Fill (snapped to integer pixels)
-    if (box.fill && box.fill.opacity > 0) {
-      ctx.fillStyle = box.fill.color;
-      ctx.globalAlpha = box.fill.opacity;
-      ctx.fillRect(boxX, boxY, boxW, computedHeightPx);
-      ctx.globalAlpha = 1.0;
+    ctx.save();
+    if (hasRotation && typeof box.rotation === 'number') {
+      ctx.translate(cx, cy);
+      ctx.rotate((box.rotation * Math.PI) / 180);
+      ctx.translate(-cx, -cy);
     }
 
-    // Render each line and its mixed tokens
-    let currentY = boxY + scaledPadding;
-
-    for (const line of lines) {
-      // Baseline calculation within the line height
-      const baselineY = Math.round(currentY + line.maxFontSize);
-
-      // Horizontal Alignment snapped to integer pixels
-      let lineStartX = Math.round(boxX + scaledPadding);
-      if (box.textAlign === 'center') {
-        lineStartX = Math.round(boxX + (boxW - line.width) / 2);
-      } else if (box.textAlign === 'right') {
-        lineStartX = Math.round(boxX + boxW - scaledPadding - line.width);
+    if (box.elementType === 'shape') {
+      drawShape(
+        ctx,
+        box.shapeType || 'rectangle',
+        boxX,
+        boxY,
+        boxW,
+        computedHeightPx,
+        box.fillColor || box.color || '#000000',
+        box.strokeColor,
+        box.strokeWidth ? box.strokeWidth * scale : undefined
+      );
+    } else if (box.elementType === 'line') {
+      drawHorizontalLine(
+        ctx,
+        boxX,
+        boxY,
+        boxW,
+        computedHeightPx,
+        box.color || '#000000',
+        Math.max(2, Math.round((box.strokeWidth || 3) * scale))
+      );
+    } else if (box.elementType === 'table') {
+      drawTable(ctx, box, boxX, boxY, boxW, computedHeightPx, scale);
+    } else if (box.elementType === 'image_overlay') {
+      if (box.imageOverlayId) {
+        const overlayImg = decodedImageCache.get(box.imageOverlayId);
+        if (overlayImg && overlayImg.complete) {
+          ctx.drawImage(overlayImg, boxX, boxY, boxW, computedHeightPx);
+        } else {
+          ctx.strokeStyle = '#D4AF37';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(boxX, boxY, boxW, computedHeightPx);
+        }
+      }
+    } else {
+      // Standard Text Box
+      if (box.fill && box.fill.opacity > 0) {
+        ctx.fillStyle = box.fill.color;
+        ctx.globalAlpha = box.fill.opacity;
+        ctx.fillRect(boxX, boxY, boxW, computedHeightPx);
+        ctx.globalAlpha = 1.0;
       }
 
-      let tokenX = lineStartX;
+      let currentY = boxY + scaledPadding;
 
-      for (const token of line.tokens) {
-        if (token.isWhitespace && token.text.trim() === '') {
-          tokenX += Math.round(token.width);
-          continue;
+      for (const line of lines) {
+        const baselineY = Math.round(currentY + line.maxFontSize);
+
+        let lineStartX = Math.round(boxX + scaledPadding);
+        if (box.textAlign === 'center') {
+          lineStartX = Math.round(boxX + (boxW - line.width) / 2);
+        } else if (box.textAlign === 'right') {
+          lineStartX = Math.round(boxX + boxW - scaledPadding - line.width);
         }
 
-        drawStyledTokenWithEffects(ctx, token, Math.round(tokenX), baselineY, scale, box);
-        tokenX += Math.round(token.width);
-      }
+        let tokenX = lineStartX;
 
-      currentY += line.height;
+        for (const token of line.tokens) {
+          if (token.isWhitespace && token.text.trim() === '') {
+            tokenX += Math.round(token.width);
+            continue;
+          }
+
+          drawStyledTokenWithEffects(ctx, token, Math.round(tokenX), baselineY, scale, box);
+          tokenX += Math.round(token.width);
+        }
+
+        currentY += line.height;
+      }
     }
 
-    ctx.restore();
-
-    // 5. Optional Selection Outline: Strictly fits computed text size with integer coordinates
+    // 5. Optional Selection Outline: Strictly fits computed element size
     if (options.showBoundingBoxes) {
       const isSelected = options.selectedBoxId === box.id;
       ctx.save();
@@ -959,7 +1207,6 @@ export async function renderDesignToCanvas(
         ctx.setLineDash([4, 4]);
       }
 
-      // Draw bounding box matching real computed height (integer snapped)
       ctx.strokeRect(boxX, boxY, boxW, computedHeightPx);
 
       if (isSelected) {
@@ -995,20 +1242,23 @@ export async function renderDesignToCanvas(
           ctx.restore();
         };
 
-        // 4 Edge Midpoint Pill Handles (IMG_1495 (2).pdf Page 11)
+        // 4 Edge Midpoint Pill Handles (W, E, N, S)
         drawPillHandle(boxX, boxY + Math.round(computedHeightPx / 2), true); // W
         drawPillHandle(boxX + boxW, boxY + Math.round(computedHeightPx / 2), true); // E
         drawPillHandle(boxX + Math.round(boxW / 2), boxY, false); // N
         drawPillHandle(boxX + Math.round(boxW / 2), boxY + computedHeightPx, false); // S
 
-        // 4 Corner handles for width & position adjustment
+        // 4 Corner handles
         drawHandle(boxX, boxY); // NW
         drawHandle(boxX + boxW, boxY); // NE
         drawHandle(boxX + boxW, boxY + computedHeightPx); // SE
         drawHandle(boxX, boxY + computedHeightPx); // SW
 
-        // Floating field badge (integer snapped)
-        const badgeText = `${box.fieldLabel} (${box.width}%)`;
+        // Floating badge
+        const badgeLabel = box.elementType === 'shape'
+          ? (box.shapeType ? box.shapeType.toUpperCase() : 'SHAPE')
+          : box.fieldLabel;
+        const badgeText = `${badgeLabel} (${box.width}%)${box.rotation ? ` ${box.rotation}°` : ''}`;
         ctx.font = `600 ${Math.max(10, Math.round(11 * scale))}px "Plus Jakarta Sans", sans-serif`;
         const badgeW = Math.round(ctx.measureText(badgeText).width + 12);
         const badgeH = Math.round(Math.max(16, Math.round(18 * scale)));
@@ -1029,5 +1279,7 @@ export async function renderDesignToCanvas(
       }
       ctx.restore();
     }
+
+    ctx.restore(); // Restore rotation context
   }
 }

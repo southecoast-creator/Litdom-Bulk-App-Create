@@ -1,13 +1,20 @@
 /**
- * Litdom Batch Studio - Sync Layout Modal
- * Exact visual match to IMG_1495 (2).pdf Page 14:
- * - "Sync this Design's Layout with" [This Page] [All] [Custom v]
- * - "Sync Text Field's Layout" [Select field v] [Sync with v]
+ * Litdom Batch Studio - Sync Layout Modal (BUG-009)
+ * Strict separation into two independent sections:
+ * Section 1: "SYNC THIS DESIGN'S LAYOUT"
+ *   - Destination: This Page [default], All, Custom (visual thumbnail picker with checkboxes)
+ *   - Action Button: "SYNC DESIGNS LAYOUT"
+ * Section 2: "SYNC TEXT FIELDS LAYOUT"
+ *   - Field selector: multiselect checkboxes of available fields
+ *   - Destination: This Page, All, Custom (visual thumbnail picker with checkboxes)
+ *   - Action Button: "SYNC TEXT FIELD"
+ * 100% preservation of destination text wording/content—only copies layout, styling, and geometry.
  */
 
-import React, { useState } from 'react';
-import { X, RefreshCw, Check, CheckSquare, Square, ChevronDown } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, Check, CheckSquare, Square, ChevronDown } from 'lucide-react';
 import { Project, TextBoxTemplate } from '../types';
+import { getThumbnailBlob, createManagedObjectUrl } from '../utils/db';
 
 interface SyncLayoutModalProps {
   project: Project;
@@ -16,7 +23,7 @@ interface SyncLayoutModalProps {
   onClose: () => void;
   onSyncAll: () => void;
   onSyncCustomPages: (pageIndices: number[]) => void;
-  onSyncFieldToPages: (fieldLabel: string, targetPageIndices: number[]) => void;
+  onSyncFieldsToPages: (fieldLabels: string[], targetPageIndices: number[]) => void;
 }
 
 export const SyncLayoutModal: React.FC<SyncLayoutModalProps> = ({
@@ -26,53 +33,117 @@ export const SyncLayoutModal: React.FC<SyncLayoutModalProps> = ({
   onClose,
   onSyncAll,
   onSyncCustomPages,
-  onSyncFieldToPages,
+  onSyncFieldsToPages,
 }) => {
-  const [selectedField, setSelectedField] = useState<string>('');
-  const [fieldSyncTarget, setFieldSyncTarget] = useState<'all' | 'custom'>('all');
-  const [customPages, setCustomPages] = useState<Set<number>>(new Set());
-  const [isCustomPagesOpen, setIsCustomPagesOpen] = useState(false);
+  // Section 1: Sync This Design's Layout
+  const [designDestination, setDesignDestination] = useState<'this' | 'all' | 'custom'>('this');
+  const [customDesignPages, setCustomDesignPages] = useState<Set<number>>(new Set());
+
+  // Section 2: Sync Text Fields Layout
+  const [selectedFields, setSelectedFields] = useState<Set<string>>(new Set());
+  const [fieldsDestination, setFieldsDestination] = useState<'this' | 'all' | 'custom'>('all');
+  const [customFieldPages, setCustomFieldPages] = useState<Set<number>>(new Set());
+
+  // Thumbnail URLs for visual picker
+  const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
   const [feedback, setFeedback] = useState<string | null>(null);
+
+  const activePage = project.pages[activePageIndex];
+  const availableBoxes =
+    activePage?.textBoxes && activePage.textBoxes.length > 0
+      ? activePage.textBoxes
+      : project.template;
+  const fields = availableBoxes.map((b) => b.fieldLabel);
+
+  // Load thumbnail Blobs on open
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    const load = async () => {
+      const map: Record<string, string> = {};
+      for (const p of project.pages) {
+        if (p.imageId) {
+          const blob = await getThumbnailBlob(p.imageId);
+          if (blob && !cancelled) {
+            map[p.id] = createManagedObjectUrl(blob);
+          }
+        }
+      }
+      if (!cancelled) setThumbnails(map);
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, project.pages]);
 
   if (!isOpen) return null;
 
-  const activePage = project.pages[activePageIndex];
-  const fields = activePage?.textBoxes?.map((b) => b.fieldLabel) || project.template.map((b) => b.fieldLabel);
+  // Toggle field selection
+  const handleToggleField = (field: string) => {
+    setSelectedFields((prev) => {
+      const next = new Set(prev);
+      if (next.has(field)) next.delete(field);
+      else next.add(field);
+      return next;
+    });
+  };
 
-  const handleApplySyncAll = () => {
-    onSyncAll();
-    setFeedback('Full layout synced to all pages!');
+  const handleSelectAllFields = () => {
+    if (selectedFields.size === fields.length) {
+      setSelectedFields(new Set());
+    } else {
+      setSelectedFields(new Set(fields));
+    }
+  };
+
+  // Section 1 Action: SYNC DESIGNS LAYOUT
+  const handleExecuteDesignSync = () => {
+    if (designDestination === 'this') {
+      onClose();
+      return;
+    }
+    if (designDestination === 'all') {
+      onSyncAll();
+      setFeedback('Layout synced to all designs!');
+    } else {
+      if (customDesignPages.size === 0) {
+        setFeedback('Select at least one target design.');
+        return;
+      }
+      onSyncCustomPages(Array.from(customDesignPages));
+      setFeedback(`Layout synced to ${customDesignPages.size} design(s)!`);
+    }
+
     setTimeout(() => {
       setFeedback(null);
       onClose();
     }, 1200);
   };
 
-  const handleApplySyncCustom = () => {
-    if (customPages.size === 0) {
-      setFeedback('Select at least one page to sync.');
+  // Section 2 Action: SYNC TEXT FIELD
+  const handleExecuteFieldSync = () => {
+    if (selectedFields.size === 0) {
+      setFeedback('Please select at least one field to sync.');
       return;
     }
-    onSyncCustomPages(Array.from(customPages));
-    setFeedback(`Layout synced to ${customPages.size} page(s)!`);
-    setTimeout(() => {
-      setFeedback(null);
-      onClose();
-    }, 1200);
-  };
 
-  const handleApplyFieldSync = () => {
-    if (!selectedField) {
-      setFeedback('Please select a text field to sync.');
-      return;
+    let targetIndices: number[] = [];
+    if (fieldsDestination === 'this') {
+      targetIndices = [activePageIndex];
+    } else if (fieldsDestination === 'all') {
+      targetIndices = Array.from({ length: project.pages.length }, (_, i) => i);
+    } else {
+      if (customFieldPages.size === 0) {
+        setFeedback('Select at least one target design for field sync.');
+        return;
+      }
+      targetIndices = Array.from(customFieldPages);
     }
-    const targets =
-      fieldSyncTarget === 'all'
-        ? Array.from({ length: project.pages.length }, (_, i) => i)
-        : Array.from(customPages);
 
-    onSyncFieldToPages(selectedField, targets);
-    setFeedback(`"${selectedField}" layout synced!`);
+    onSyncFieldsToPages(Array.from(selectedFields), targetIndices);
+    setFeedback(`${selectedFields.size} field(s) layout synced!`);
+
     setTimeout(() => {
       setFeedback(null);
       onClose();
@@ -80,128 +151,259 @@ export const SyncLayoutModal: React.FC<SyncLayoutModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
-      <div className="w-full max-w-sm sm:max-w-md bg-[#F4D58D] text-black rounded-3xl p-6 shadow-2xl flex flex-col gap-4 relative border-2 border-[#D4AF37]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-150">
+      <div className="w-full max-w-md bg-[#F4D58D] text-black rounded-3xl p-5 sm:p-6 shadow-2xl flex flex-col gap-4 relative border-2 border-[#D4AF37] max-h-[90vh] overflow-y-auto">
         {/* Cancel button */}
         <button
           onClick={onClose}
-          className="absolute right-4 top-4 text-black/60 hover:text-black p-1 rounded-full hover:bg-black/10 transition-colors"
+          className="absolute right-4 top-4 text-black/60 hover:text-black p-1.5 rounded-full hover:bg-black/10 transition-colors"
+          title="Close"
         >
           <X className="w-5 h-5" />
         </button>
 
         {feedback && (
-          <div className="p-2 bg-black text-white text-xs font-semibold rounded-xl text-center flex items-center justify-center gap-1.5 animate-pulse">
-            <Check className="w-4 h-4 text-amber-400" />
+          <div className="p-2.5 bg-black text-[#D4AF37] text-xs font-bold rounded-2xl text-center flex items-center justify-center gap-2 animate-bounce shadow-lg">
+            <Check className="w-4 h-4 text-[#D4AF37]" />
             <span>{feedback}</span>
           </div>
         )}
 
-        {/* Section 1: Sync this Design's Layout with */}
-        <div className="flex flex-col gap-2 pt-2">
-          <h3 className="text-xs sm:text-sm font-bold text-black text-center">
-            Sync this Design’s Layout with
-          </h3>
+        {/* ========================================================
+            SECTION 1: SYNC THIS DESIGN'S LAYOUT
+           ======================================================== */}
+        <div className="flex flex-col gap-3 pt-1">
+          <div className="text-center">
+            <h3 className="font-extrabold text-sm sm:text-base text-black tracking-wide uppercase">
+              SYNC THIS DESIGN’S LAYOUT
+            </h3>
+            <p className="text-[11px] text-black/70 mt-0.5">
+              Syncs positioning, size, fonts, and styles from Design #{activePageIndex + 1}
+            </p>
+          </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          {/* Destination Selector: This Page, All, Custom */}
+          <div className="grid grid-cols-3 gap-2">
             <button
-              onClick={onClose}
-              className="bg-black/20 hover:bg-black/30 text-black font-bold text-xs py-3 rounded-2xl transition-all"
+              type="button"
+              onClick={() => setDesignDestination('this')}
+              className={`py-2 px-1 rounded-2xl text-xs font-bold transition-all text-center ${
+                designDestination === 'this'
+                  ? 'bg-black text-white shadow-md'
+                  : 'bg-black/15 text-black hover:bg-black/25'
+              }`}
             >
               This Page
             </button>
             <button
-              onClick={handleApplySyncAll}
-              className="bg-black hover:bg-black/85 text-white font-bold text-base py-3 rounded-2xl shadow-lg transition-all active:scale-95"
+              type="button"
+              onClick={() => setDesignDestination('all')}
+              className={`py-2 px-1 rounded-2xl text-xs font-bold transition-all text-center ${
+                designDestination === 'all'
+                  ? 'bg-black text-white shadow-md'
+                  : 'bg-black/15 text-black hover:bg-black/25'
+              }`}
             >
-              All
+              All Designs
+            </button>
+            <button
+              type="button"
+              onClick={() => setDesignDestination('custom')}
+              className={`py-2 px-1 rounded-2xl text-xs font-bold transition-all text-center ${
+                designDestination === 'custom'
+                  ? 'bg-black text-white shadow-md'
+                  : 'bg-black/15 text-black hover:bg-black/25'
+              }`}
+            >
+              Custom
             </button>
           </div>
 
-          <button
-            onClick={() => setIsCustomPagesOpen(!isCustomPagesOpen)}
-            className="w-full bg-black text-white font-bold text-xs py-3 px-4 rounded-2xl flex items-center justify-between shadow-md"
-          >
-            <span>Custom ({customPages.size} selected)</span>
-            <ChevronDown className="w-4 h-4" />
-          </button>
-
-          {isCustomPagesOpen && (
-            <div className="bg-black/10 rounded-2xl p-3 flex flex-col gap-2 max-h-40 overflow-y-auto">
-              <span className="text-[11px] font-bold text-black/80">Select target pages:</span>
+          {/* Visual Thumbnails Picker if Custom */}
+          {designDestination === 'custom' && (
+            <div className="bg-black/10 rounded-2xl p-2.5 flex flex-col gap-2 max-h-48 overflow-y-auto border border-black/15">
+              <span className="text-[11px] font-bold text-black/80">Select target designs:</span>
               <div className="grid grid-cols-3 gap-2">
                 {project.pages.map((p, idx) => {
                   if (idx === activePageIndex) return null;
-                  const isChecked = customPages.has(idx);
+                  const isChecked = customDesignPages.has(idx);
+                  const thumb = thumbnails[p.id];
                   return (
-                    <button
+                    <div
                       key={p.id}
                       onClick={() => {
-                        const next = new Set(customPages);
+                        const next = new Set(customDesignPages);
                         if (isChecked) next.delete(idx);
                         else next.add(idx);
-                        setCustomPages(next);
+                        setCustomDesignPages(next);
                       }}
-                      className={`text-xs py-1.5 px-2 rounded-xl font-bold flex items-center gap-1 transition-all ${
-                        isChecked ? 'bg-black text-white' : 'bg-black/20 text-black'
+                      className={`cursor-pointer rounded-xl p-1 border-2 flex flex-col items-center gap-1 transition-all ${
+                        isChecked ? 'border-black bg-black text-white' : 'border-black/20 bg-white/40 text-black'
                       }`}
                     >
-                      {isChecked ? <CheckSquare className="w-3.5 h-3.5" /> : <Square className="w-3.5 h-3.5" />}
-                      <span>P{idx + 1}</span>
-                    </button>
+                      <div className="w-full aspect-[3/4] bg-black/20 rounded-lg overflow-hidden flex items-center justify-center">
+                        {thumb ? (
+                          <img src={thumb} alt={p.name} className="w-full h-full object-cover" />
+                        ) : (
+                          <span className="text-[10px]">#{idx + 1}</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1 text-[10px] font-bold">
+                        {isChecked ? <CheckSquare className="w-3 h-3 text-[#D4AF37]" /> : <Square className="w-3 h-3 text-black/40" />}
+                        <span>Design {idx + 1}</span>
+                      </div>
+                    </div>
                   );
                 })}
               </div>
-              <button
-                onClick={handleApplySyncCustom}
-                className="bg-black text-white font-bold text-xs py-2 rounded-xl mt-1"
-              >
-                Apply Layout to Selected Pages
-              </button>
             </div>
           )}
+
+          {/* Final Action Button 1 */}
+          <button
+            type="button"
+            onClick={handleExecuteDesignSync}
+            className="w-full bg-black hover:bg-black/85 text-white font-extrabold text-xs py-3 rounded-2xl shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2"
+          >
+            <span>SYNC DESIGNS LAYOUT</span>
+          </button>
         </div>
 
-        {/* Section 2: Sync Text Field's Layout */}
-        <div className="flex flex-col gap-2 border-t border-black/20 pt-4">
-          <h3 className="text-xs sm:text-sm font-bold text-black text-center">
-            Sync Text Field’s Layout
-          </h3>
+        {/* Divider */}
+        <div className="h-px bg-black/20 my-1" />
 
-          <div className="relative">
-            <select
-              value={selectedField}
-              onChange={(e) => setSelectedField(e.target.value)}
-              className="w-full bg-black text-white font-bold text-xs px-4 py-2.5 rounded-2xl appearance-none pr-8 cursor-pointer focus:outline-none"
-            >
-              <option value="">Select field…</option>
-              {fields.map((f) => (
-                <option key={f} value={f}>
-                  {f}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="w-4 h-4 text-white absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+        {/* ========================================================
+            SECTION 2: SYNC TEXT FIELDS LAYOUT
+           ======================================================== */}
+        <div className="flex flex-col gap-3">
+          <div className="text-center">
+            <h3 className="font-extrabold text-sm sm:text-base text-black tracking-wide uppercase">
+              SYNC TEXT FIELDS LAYOUT
+            </h3>
+            <p className="text-[11px] text-black/70 mt-0.5">
+              Select specific fields and apply their styles without changing destination text
+            </p>
           </div>
 
-          <div className="relative">
-            <select
-              value={fieldSyncTarget}
-              onChange={(e) => setFieldSyncTarget(e.target.value as any)}
-              className="w-full bg-black text-white font-bold text-xs px-4 py-2.5 rounded-2xl appearance-none pr-8 cursor-pointer focus:outline-none"
-            >
-              <option value="all">Sync with All Pages</option>
-              <option value="custom">Sync with Selected Custom Pages</option>
-            </select>
-            <ChevronDown className="w-4 h-4 text-white absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+          {/* Field Multiselect Checkbox List */}
+          <div className="bg-black/10 rounded-2xl p-2.5 flex flex-col gap-1.5 border border-black/15">
+            <div className="flex items-center justify-between pb-1 border-b border-black/15">
+              <span className="text-[11px] font-bold text-black/80">Choose field(s) to sync:</span>
+              <button
+                type="button"
+                onClick={handleSelectAllFields}
+                className="text-[10px] font-bold text-black underline hover:text-[#B88E18]"
+              >
+                {selectedFields.size === fields.length ? 'Deselect All' : 'Select All'}
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
+              {fields.map((f) => {
+                const isSelected = selectedFields.has(f);
+                return (
+                  <button
+                    key={f}
+                    type="button"
+                    onClick={() => handleToggleField(f)}
+                    className={`px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all ${
+                      isSelected
+                        ? 'bg-black text-white shadow-sm'
+                        : 'bg-black/15 text-black hover:bg-black/25'
+                    }`}
+                  >
+                    {isSelected ? <CheckSquare className="w-3.5 h-3.5 text-[#D4AF37]" /> : <Square className="w-3.5 h-3.5 text-black/50" />}
+                    <span>{f}</span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
+          {/* Destination Selector for Fields */}
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              type="button"
+              onClick={() => setFieldsDestination('this')}
+              className={`py-2 px-1 rounded-2xl text-xs font-bold transition-all text-center ${
+                fieldsDestination === 'this'
+                  ? 'bg-black text-white shadow-md'
+                  : 'bg-black/15 text-black hover:bg-black/25'
+              }`}
+            >
+              This Page
+            </button>
+            <button
+              type="button"
+              onClick={() => setFieldsDestination('all')}
+              className={`py-2 px-1 rounded-2xl text-xs font-bold transition-all text-center ${
+                fieldsDestination === 'all'
+                  ? 'bg-black text-white shadow-md'
+                  : 'bg-black/15 text-black hover:bg-black/25'
+              }`}
+            >
+              All Designs
+            </button>
+            <button
+              type="button"
+              onClick={() => setFieldsDestination('custom')}
+              className={`py-2 px-1 rounded-2xl text-xs font-bold transition-all text-center ${
+                fieldsDestination === 'custom'
+                  ? 'bg-black text-white shadow-md'
+                  : 'bg-black/15 text-black hover:bg-black/25'
+              }`}
+            >
+              Custom
+            </button>
+          </div>
+
+          {/* Visual Thumbnails Picker if Custom for Fields */}
+          {fieldsDestination === 'custom' && (
+            <div className="bg-black/10 rounded-2xl p-2.5 flex flex-col gap-2 max-h-48 overflow-y-auto border border-black/15">
+              <span className="text-[11px] font-bold text-black/80">Select target designs:</span>
+              <div className="grid grid-cols-3 gap-2">
+                {project.pages.map((p, idx) => {
+                  if (idx === activePageIndex) return null;
+                  const isChecked = customFieldPages.has(idx);
+                  const thumb = thumbnails[p.id];
+                  return (
+                    <div
+                      key={p.id}
+                      onClick={() => {
+                        const next = new Set(customFieldPages);
+                        if (isChecked) next.delete(idx);
+                        else next.add(idx);
+                        setCustomFieldPages(next);
+                      }}
+                      className={`cursor-pointer rounded-xl p-1 border-2 flex flex-col items-center gap-1 transition-all ${
+                        isChecked ? 'border-black bg-black text-white' : 'border-black/20 bg-white/40 text-black'
+                      }`}
+                    >
+                      <div className="w-full aspect-[3/4] bg-black/20 rounded-lg overflow-hidden flex items-center justify-center">
+                        {thumb ? (
+                          <img src={thumb} alt={p.name} className="w-full h-full object-cover" />
+                        ) : (
+                          <span className="text-[10px]">#{idx + 1}</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1 text-[10px] font-bold">
+                        {isChecked ? <CheckSquare className="w-3 h-3 text-[#D4AF37]" /> : <Square className="w-3 h-3 text-black/40" />}
+                        <span>Design {idx + 1}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Final Action Button 2 */}
           <button
-            onClick={handleApplyFieldSync}
-            disabled={!selectedField}
-            className="w-full bg-black hover:bg-black/85 text-white font-bold text-xs py-2.5 rounded-2xl transition-all disabled:opacity-40 shadow-md active:scale-95"
+            type="button"
+            onClick={handleExecuteFieldSync}
+            disabled={selectedFields.size === 0}
+            className="w-full bg-black hover:bg-black/85 disabled:opacity-40 text-white font-extrabold text-xs py-3 rounded-2xl shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2"
           >
-            Sync Selected Field Layout
+            <span>SYNC TEXT FIELD</span>
           </button>
         </div>
       </div>

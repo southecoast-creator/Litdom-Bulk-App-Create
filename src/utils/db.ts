@@ -704,19 +704,22 @@ export async function deleteDesignsFromProjectAtomic(
   });
 }
 
+export const APP_STORAGE_QUOTA_BYTES = 2 * 1024 * 1024 * 1024; // Fixed 2 GB dedicated app quota
+
 /**
  * Exact Storage Calculation:
  * Exact sum of the byte sizes of all stored image blobs (original + preview + thumbnail),
- * font blobs, and project JSON strings. Reads 0 B when nothing is stored.
+ * font blobs, project JSON strings, and saved template JSON strings. Reads 0 B when empty.
  */
 export async function calculateExactStorageBreakdown(): Promise<StorageBreakdown> {
   const db = await getDB();
 
   return new Promise<StorageBreakdown>((resolve, reject) => {
-    const tx = db.transaction([STORE_PROJECTS, STORE_IMAGES, STORE_FONTS], 'readonly');
+    const tx = db.transaction([STORE_PROJECTS, STORE_IMAGES, STORE_FONTS, STORE_TEMPLATES], 'readonly');
     const projStore = tx.objectStore(STORE_PROJECTS);
     const imgStore = tx.objectStore(STORE_IMAGES);
     const fontStore = tx.objectStore(STORE_FONTS);
+    const tplStore = tx.objectStore(STORE_TEMPLATES);
 
     let projectsBytes = 0;
     let designsBytes = 0;
@@ -727,6 +730,7 @@ export async function calculateExactStorageBreakdown(): Promise<StorageBreakdown
     const imgReq = imgStore.getAll();
     const fontReq = fontStore.getAll();
     const projReq = projStore.getAll();
+    const tplReq = tplStore.getAll();
 
     tx.oncomplete = () => {
       // 1. Calculate image sizes
@@ -746,7 +750,13 @@ export async function calculateExactStorageBreakdown(): Promise<StorageBreakdown
         fontsBytes += f.blob ? f.blob.size || 0 : f.fileSize || 0;
       }
 
-      // 3. Calculate project sizes
+      // 3. Calculate template sizes
+      const templates: SavedTemplate[] = tplReq.result || [];
+      for (const tpl of templates) {
+        projectsBytes += new Blob([JSON.stringify(tpl)]).size;
+      }
+
+      // 4. Calculate project sizes
       const projects: Project[] = projReq.result || [];
       for (const p of projects) {
         const jsonBytes = new Blob([JSON.stringify(p)]).size;

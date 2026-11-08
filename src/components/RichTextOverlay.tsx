@@ -405,6 +405,21 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
     updateSelectedTokens(() => ({ strike: nextStrike }));
   };
 
+  const handleConvertCase = (mode: 'lower' | 'upper' | 'mixed') => {
+    if (!hasSelection) return;
+    updateSelectedTokens((t) => {
+      let nextText = t.text;
+      if (mode === 'lower') {
+        nextText = t.text.toLowerCase();
+      } else if (mode === 'upper') {
+        nextText = t.text.toUpperCase();
+      } else if (mode === 'mixed') {
+        nextText = t.text.charAt(0).toUpperCase() + t.text.slice(1).toLowerCase();
+      }
+      return { text: nextText };
+    });
+  };
+
   const handleApplyColor = (colorHex: string) => {
     updateSelectedTokens(() => ({ color: colorHex }));
   };
@@ -677,91 +692,6 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
           </div>
         </div>
 
-        {/* Word Selection Utility Bar: Select all, Select range, Multi-word, Clear */}
-        <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-[#212128]/80 bg-[#14141A] overflow-x-auto scrollbar-none text-xs">
-          {/* Select all utility button */}
-          <button
-            type="button"
-            onClick={handleSelectAll}
-            className={`px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all min-h-[36px] flex items-center gap-1.5 shrink-0 active:scale-95 ${
-              selectedWordIndices.size === totalWords && totalWords > 0
-                ? 'bg-[#D4AF37] text-[#0B0B0F] border-[#D4AF37] font-bold shadow-sm'
-                : 'bg-[#1C1C24] hover:bg-[#262632] border-[#333342] text-[#FFF8E7]/90'
-            }`}
-            title="Select all words in this text box"
-          >
-            <CheckSquare className="w-3.5 h-3.5" />
-            <span>Select all</span>
-            {totalWords > 0 && (
-              <span className="text-[10px] opacity-75 font-mono">({totalWords})</span>
-            )}
-          </button>
-
-          {/* Select range utility button */}
-          <button
-            type="button"
-            onClick={handleToggleRangeMode}
-            className={`px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all min-h-[36px] flex items-center gap-1.5 shrink-0 active:scale-95 ${
-              isRangeMode
-                ? 'bg-[#D4AF37] text-[#0B0B0F] border-[#D4AF37] font-bold shadow-md shadow-[#D4AF37]/20 ring-1 ring-[#D4AF37]'
-                : 'bg-[#1C1C24] hover:bg-[#262632] border-[#333342] text-[#FFF8E7]/90'
-            }`}
-            title="Select a continuous range of words without long-pressing"
-          >
-            <Layers className="w-3.5 h-3.5" />
-            <span>Select range</span>
-            {isRangeMode && (
-              <span className="w-2 h-2 rounded-full bg-[#0B0B0F] animate-ping" />
-            )}
-          </button>
-
-          {/* Multi-word Selection Utility button */}
-          <button
-            type="button"
-            onClick={handleToggleMultiSelectMode}
-            className={`px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all min-h-[36px] flex items-center gap-1.5 shrink-0 active:scale-95 ${
-              isMultiSelectMode
-                ? 'bg-[#D4AF37] text-[#0B0B0F] border-[#D4AF37] font-bold shadow-md shadow-[#D4AF37]/20'
-                : 'bg-[#1C1C24] hover:bg-[#262632] border-[#333342] text-[#FFF8E7]/90'
-            }`}
-            title="Pick multiple individual words (tap words to add or remove)"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>Multi-word</span>
-            {isMultiSelectMode && (
-              <span className="text-[10px] px-1 py-0.2 bg-[#0B0B0F]/20 rounded font-mono font-bold">ON</span>
-            )}
-          </button>
-
-          {/* Clear Selection button */}
-          {hasSelection && (
-            <button
-              type="button"
-              onClick={handleClearSelection}
-              className="px-2.5 py-1.5 bg-[#1C1C24]/60 hover:bg-[#262632] border border-[#333342]/60 text-xs text-[#FFF8E7]/60 hover:text-white rounded-lg transition-colors min-h-[36px] shrink-0 active:scale-95 flex items-center gap-1"
-              title="Clear word selection"
-            >
-              <RotateCcw className="w-3 h-3" />
-              <span>Clear</span>
-            </button>
-          )}
-
-          {/* Range Mode / Multi-Select Guidance Badge */}
-          {isRangeMode && (
-            <span className="text-[11px] text-[#D4AF37] bg-[#D4AF37]/10 px-2 py-1 rounded-md border border-[#D4AF37]/30 whitespace-nowrap animate-pulse flex items-center gap-1 ml-auto shrink-0">
-              {rangeAnchorIndex === null
-                ? 'Step 1: Tap first word'
-                : 'Step 2: Tap last word to complete range'}
-            </span>
-          )}
-
-          {isMultiSelectMode && !isRangeMode && (
-            <span className="text-[11px] text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded-md border border-emerald-500/30 whitespace-nowrap flex items-center gap-1 ml-auto shrink-0">
-              ✓ Tap words to add / remove
-            </span>
-          )}
-        </div>
-
         {/* Primary Formatting Controls Row */}
         <div
           className={`flex items-center gap-2 p-2.5 overflow-x-auto scrollbar-none transition-opacity ${
@@ -825,6 +755,34 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
           >
             <Strikethrough className="w-4 h-4" />
           </button>
+
+          {/* Aa Case Conversion (lower, upper, mixed) */}
+          <div className="flex items-center bg-[#1C1C24] border border-[#333342] rounded-xl overflow-hidden min-h-[44px] shrink-0 p-0.5">
+            <button
+              type="button"
+              onClick={() => handleConvertCase('lower')}
+              className="px-2 py-1.5 rounded-lg text-xs font-mono text-[#FFF8E7]/80 hover:text-white hover:bg-[#2A2A36] transition-colors"
+              title="Convert selected word(s) to lowercase"
+            >
+              aa
+            </button>
+            <button
+              type="button"
+              onClick={() => handleConvertCase('upper')}
+              className="px-2 py-1.5 rounded-lg text-xs font-mono font-bold text-[#FFF8E7]/80 hover:text-white hover:bg-[#2A2A36] transition-colors"
+              title="Convert selected word(s) to UPPERCASE"
+            >
+              AA
+            </button>
+            <button
+              type="button"
+              onClick={() => handleConvertCase('mixed')}
+              className="px-2 py-1.5 rounded-lg text-xs font-mono font-bold text-[#D4AF37] hover:bg-[#2A2A36] transition-colors"
+              title="Convert selected word(s) to Mixed/Title Case"
+            >
+              Aa
+            </button>
+          </div>
 
           <div className="h-6 w-px bg-[#262632] mx-0.5 shrink-0" />
 

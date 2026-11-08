@@ -81,8 +81,9 @@ export interface TextBoxTemplate {
   fontStyle: 'normal' | 'italic';
   textAlign: 'left' | 'center' | 'right' | 'justify';
   color: string;
-  lineHeight: number;
-  letterSpacing: number;
+  lineHeight?: number;
+  letterSpacing?: number;
+  textCase?: 'lowercase' | 'uppercase' | 'title' | 'none';
   padding?: number;
   shadow?: {
     color: string;
@@ -99,6 +100,16 @@ export interface TextBoxTemplate {
     opacity: number;
   };
   effects?: TextRunEffect;
+  elementType?: 'text' | 'shape' | 'table' | 'line' | 'image_overlay';
+  shapeType?: 'rectangle' | 'square' | 'circle' | 'triangle' | 'star';
+  rotation?: number; // 0 - 360 degrees
+  fillColor?: string;
+  strokeColor?: string;
+  strokeWidth?: number;
+  imageOverlayId?: string;
+  tableRows?: number;
+  tableCols?: number;
+  tableData?: string[][];
 }
 
 export interface DesignPage {

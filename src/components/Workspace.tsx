@@ -46,6 +46,10 @@ import {
   X,
   Image as ImageIcon,
   Feather,
+  RotateCw,
+  Move,
+  ArrowUp,
+  ArrowDown,
 } from 'lucide-react';
 import {
   Project,
@@ -78,6 +82,7 @@ import { FontManagerModal } from './FontManagerModal';
 import { RichTextOverlay } from './RichTextOverlay';
 import { SyncLayoutModal } from './SyncLayoutModal';
 import { AddPanelModal } from './AddPanelModal';
+import { ShapePanelModal, ShapeType } from './ShapePanelModal';
 import { MoreMenuDrawer } from './MoreMenuDrawer';
 import { SocialShareModal } from './SocialShareModal';
 
@@ -129,6 +134,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   const [isFontManagerOpen, setIsFontManagerOpen] = useState(false);
   const [isSyncLayoutOpen, setIsSyncLayoutOpen] = useState(false);
   const [isAddPanelOpen, setIsAddPanelOpen] = useState(false);
+  const [isShapePanelOpen, setIsShapePanelOpen] = useState(false);
   const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
   const [isSocialShareOpen, setIsSocialShareOpen] = useState(false);
   const [showTopThumbnails, setShowTopThumbnails] = useState(false);
@@ -137,6 +143,10 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   >(null);
   const [isUploadMenuOpen, setIsUploadMenuOpen] = useState(false);
   const [isRightPanelOpen, setIsRightPanelOpen] = useState(false);
+
+  // Touch Swipe Refs for Canvas Workspace (BUG-005)
+  const touchStartXRef = useRef<number | null>(null);
+  const touchStartYRef = useRef<number | null>(null);
 
   // Installed Custom Fonts
   const [installedFonts, setInstalledFonts] = useState<StoredFontRecord[]>([]);
@@ -168,6 +178,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   // File Input Refs for Uploads
   const batchUploadRef = useRef<HTMLInputElement>(null);
   const singleUploadRef = useRef<HTMLInputElement>(null);
+  const overlayUploadRef = useRef<HTMLInputElement>(null);
 
   // Width Resize & Drag State (automatic height)
   const [activeHandle, setActiveHandle] = useState<CanvasHandleType | null>(null);
@@ -177,6 +188,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     boxX: number;
     boxY: number;
     boxW: number;
+    fontSize?: number;
   } | null>(null);
 
   // Snap-to-Grid mode for precise alignment
@@ -288,15 +300,72 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
     let isCancelled = false;
 
+    // Safety timeout recovery (BUG-013) to prevent UI freezing if image storage takes too long or errors
+    const safetyTimer = setTimeout(() => {
+      if (!isCancelled) {
+        setCurrentImageData((current) => {
+          if (!current || current.imageId !== targetImageId) {
+            console.warn(`Safety timeout reached for image ${targetImageId}; applying fallback surface`);
+            try {
+              const off = document.createElement('canvas');
+              off.width = 1000;
+              off.height = 1000;
+              const ctx = off.getContext('2d');
+              if (ctx) {
+                ctx.fillStyle = '#FFFFFF';
+                ctx.fillRect(0, 0, 1000, 1000);
+              }
+              off.toBlob((fb) => {
+                if (fb && !isCancelled) {
+                  setCurrentImageData({ imageId: targetImageId, blob: fb });
+                }
+              }, 'image/png');
+            } catch {}
+          }
+          return current;
+        });
+      }
+    }, 4500);
+
     // Use fast ~1200px preview blob for buttery screen editing
     getPreviewImageBlob(targetImageId)
       .then((blob) => {
+        clearTimeout(safetyTimer);
         if (!isCancelled && blob) {
           setCurrentImageData({ imageId: targetImageId, blob });
+        } else if (!isCancelled && !blob) {
+          // If no blob in IndexedDB, generate plain surface fallback
+          const off = document.createElement('canvas');
+          off.width = 1000;
+          off.height = 1000;
+          const ctx = off.getContext('2d');
+          if (ctx) {
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(0, 0, 1000, 1000);
+          }
+          off.toBlob((fb) => {
+            if (fb && !isCancelled) {
+              setCurrentImageData({ imageId: targetImageId, blob: fb });
+            }
+          }, 'image/png');
         }
       })
       .catch((err) => {
+        clearTimeout(safetyTimer);
         console.error('Failed to load image preview:', err);
+        const off = document.createElement('canvas');
+        off.width = 1000;
+        off.height = 1000;
+        const ctx = off.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, 1000, 1000);
+        }
+        off.toBlob((fb) => {
+          if (fb && !isCancelled) {
+            setCurrentImageData({ imageId: targetImageId, blob: fb });
+          }
+        }, 'image/png');
       });
 
     // Pre-decode adjacent images in the background
@@ -316,6 +385,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
     return () => {
       isCancelled = true;
+      clearTimeout(safetyTimer);
     };
   }, [activePage?.id, activePage?.imageId, activePageIndex, project.pages]);
 
@@ -821,17 +891,54 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   };
 
   const handleSyncFieldToPages = (fieldLabel: string, targetPageIndices: number[]) => {
-    const sourceBox = activeBoxes.find((b) => b.fieldLabel === fieldLabel);
-    if (!sourceBox) return;
+    handleSyncFieldsToPages([fieldLabel], targetPageIndices);
+  };
+
+  const handleSyncFieldsToPages = (fieldLabels: string[], targetPageIndices: number[]) => {
+    if (!activePage || fieldLabels.length === 0 || targetPageIndices.length === 0) return;
     recordHistory(project);
+
+    const sourceBoxes = activeBoxes.filter((b) => fieldLabels.includes(b.fieldLabel));
+    if (sourceBoxes.length === 0) return;
+
     const updatedPages = project.pages.map((p, idx) => {
       if (targetPageIndices.includes(idx)) {
-        const pBoxes = p.textBoxes && p.textBoxes.length > 0 ? p.textBoxes : project.template;
-        const updated = pBoxes.map((b) => (b.fieldLabel === fieldLabel ? { ...b, ...sourceBox } : b));
+        const pBoxes = p.textBoxes && p.textBoxes.length > 0 ? [...p.textBoxes] : [...project.template];
+        const updated = pBoxes.map((b) => {
+          const match = sourceBoxes.find((sb) => sb.fieldLabel === b.fieldLabel);
+          if (match) {
+            return {
+              ...b,
+              x: match.x,
+              y: match.y,
+              width: match.width,
+              height: match.height,
+              fontFamily: match.fontFamily,
+              fontSize: match.fontSize,
+              fontWeight: match.fontWeight,
+              fontStyle: match.fontStyle,
+              textAlign: match.textAlign,
+              color: match.color,
+              lineHeight: match.lineHeight,
+              letterSpacing: match.letterSpacing,
+              rotation: match.rotation,
+              textCase: match.textCase,
+              shadow: match.shadow ? JSON.parse(JSON.stringify(match.shadow)) : undefined,
+              stroke: match.stroke ? JSON.parse(JSON.stringify(match.stroke)) : undefined,
+              fill: match.fill ? JSON.parse(JSON.stringify(match.fill)) : undefined,
+              effects: match.effects ? JSON.parse(JSON.stringify(match.effects)) : undefined,
+              fillColor: match.fillColor,
+              strokeColor: match.strokeColor,
+              strokeWidth: match.strokeWidth,
+            };
+          }
+          return b;
+        });
         return { ...p, textBoxes: updated };
       }
       return p;
     });
+
     const updatedProj: Project = {
       ...project,
       pages: updatedPages,
@@ -839,7 +946,144 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     };
     onUpdateProject(updatedProj);
     triggerAutoSave(updatedProj);
-    showToast(`Field "${fieldLabel}" synced`);
+    showToast(`Synced ${fieldLabels.length} field(s) across ${targetPageIndices.length} design(s)`);
+  };
+
+  // Insert Shape Handler (BUG-007)
+  const handleInsertShape = (shapeType: ShapeType) => {
+    if (!activePage) return;
+    recordHistory(project);
+    const newBox: TextBoxTemplate = {
+      id: `shape_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      fieldLabel: shapeType.charAt(0).toUpperCase() + shapeType.slice(1),
+      elementType: 'shape',
+      shapeType,
+      x: 37.5,
+      y: 37.5,
+      width: 25,
+      height: 25,
+      fontFamily: 'Plus Jakarta Sans',
+      fontSize: 24,
+      fontWeight: '500',
+      fontStyle: 'normal',
+      textAlign: 'center',
+      color: '#000000',
+      fillColor: '#000000',
+      strokeColor: 'transparent',
+      strokeWidth: 0,
+      rotation: 0,
+    };
+
+    const updatedBoxes = [...activeBoxes, newBox];
+    const updatedPages = project.pages.map((p, idx) =>
+      idx === activePageIndex ? { ...p, textBoxes: updatedBoxes } : p
+    );
+    const updatedProj: Project = {
+      ...project,
+      pages: updatedPages,
+      updatedAt: Date.now(),
+    };
+    onUpdateProject(updatedProj);
+    setSelectedBoxId(newBox.id);
+    triggerAutoSave(updatedProj);
+    setIsShapePanelOpen(false);
+    showToast(`Added ${shapeType}`);
+  };
+
+  // Insert Image Overlay Handler (BUG-008)
+  const handleInsertImageOverlay = async (files: FileList | null) => {
+    if (!files || files.length === 0 || !activePage) return;
+    const file = files[0];
+    if (!file.type.startsWith('image/')) return;
+    recordHistory(project);
+
+    try {
+      const stored = await storeImageFile(file);
+      const newBox: TextBoxTemplate = {
+        id: `img_overlay_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        fieldLabel: file.name.replace(/\.[^/.]+$/, ''),
+        elementType: 'image_overlay',
+        imageOverlayId: stored.imageId,
+        x: 30,
+        y: 30,
+        width: 40,
+        height: 40,
+        fontFamily: 'Plus Jakarta Sans',
+        fontSize: 24,
+        fontWeight: '500',
+        fontStyle: 'normal',
+        textAlign: 'center',
+        color: '#FFFFFF',
+        rotation: 0,
+      };
+
+      const updatedBoxes = [...activeBoxes, newBox];
+      const updatedPages = project.pages.map((p, idx) =>
+        idx === activePageIndex ? { ...p, textBoxes: updatedBoxes } : p
+      );
+      const updatedProj: Project = {
+        ...project,
+        pages: updatedPages,
+        updatedAt: Date.now(),
+      };
+      onUpdateProject(updatedProj);
+      setSelectedBoxId(newBox.id);
+      triggerAutoSave(updatedProj);
+      setIsUploadMenuOpen(false);
+      showToast('Image overlay added');
+    } catch (err) {
+      console.error('Failed to insert image overlay:', err);
+      showToast('Failed to insert image overlay');
+    }
+  };
+
+  // Duplicate Selected Box (BUG-011)
+  const handleDuplicateSelectedBox = () => {
+    if (!selectedBox || !activePage) return;
+    recordHistory(project);
+
+    const duplicated: TextBoxTemplate = {
+      ...JSON.parse(JSON.stringify(selectedBox)),
+      id: `dup_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      x: Math.min(90 - (selectedBox.width || 25), selectedBox.x + 3),
+      y: Math.min(85, selectedBox.y + 3),
+    };
+
+    const updatedBoxes = [...activeBoxes, duplicated];
+    const updatedPages = project.pages.map((p, idx) =>
+      idx === activePageIndex ? { ...p, textBoxes: updatedBoxes } : p
+    );
+    const updatedProj: Project = {
+      ...project,
+      pages: updatedPages,
+      updatedAt: Date.now(),
+    };
+    onUpdateProject(updatedProj);
+    setSelectedBoxId(duplicated.id);
+    triggerAutoSave(updatedProj);
+    showToast('Duplicated element');
+  };
+
+  // Delete Selected Box (BUG-011)
+  const handleDeleteSelectedBox = () => {
+    if (!selectedBoxId) return;
+    handleDeleteField(selectedBoxId);
+  };
+
+  // Rotate Selected Box (BUG-011)
+  const handleRotateSelectedBox = (deltaDegrees: number = 90) => {
+    if (!selectedBox) return;
+    const currentRot = selectedBox.rotation || 0;
+    const nextRot = (currentRot + deltaDegrees) % 360;
+    handleUpdateStyle(selectedBox.id, { rotation: nextRot });
+  };
+
+  // Nudge Selected Box (BUG-011, BUG-012)
+  const handleNudgeSelectedBox = (dxPercent: number, dyPercent: number) => {
+    if (!selectedBox) return;
+    const newX = Math.max(0, Math.min(100 - selectedBox.width, selectedBox.x + dxPercent));
+    const newY = Math.max(0, Math.min(95, selectedBox.y + dyPercent));
+    handleUpdateCurrentDesignBoxGeometry(selectedBox.id, { x: newX, y: newY, width: selectedBox.width });
   };
 
   // Delete Field
@@ -980,6 +1224,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       boxX: box.x,
       boxY: box.y,
       boxW: box.width,
+      fontSize: box.fontSize || 24,
     });
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -1098,6 +1343,8 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     let newY = dragStart.boxY;
     let newW = dragStart.boxW;
 
+    const initialFontSize = dragStart.fontSize || 24;
+
     switch (activeHandle) {
       case 'move':
         newX = Math.max(0, Math.min(100 - dragStart.boxW, Math.round(dragStart.boxX + deltaX)));
@@ -1105,17 +1352,55 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         break;
 
       case 'e':
-      case 'se':
-      case 'ne':
+        // Middle right handle: adjust width only (causes text wrap)
         newW = Math.max(10, Math.min(100 - dragStart.boxX, Math.round(dragStart.boxW + deltaX)));
         break;
 
       case 'w':
-      case 'sw':
-      case 'nw':
+        // Middle left handle: adjust width only (causes text wrap)
         newW = Math.max(10, Math.round(dragStart.boxW - deltaX));
         newX = Math.max(0, Math.min(dragStart.boxX + dragStart.boxW - 10, Math.round(dragStart.boxX + deltaX)));
         break;
+
+      case 'se': {
+        // Corner bottom-right: proportional scale (scales font size)
+        const scaleFactor = Math.max(0.2, (dragStart.boxW + deltaX) / dragStart.boxW);
+        newW = Math.max(10, Math.min(100 - dragStart.boxX, Math.round(dragStart.boxW * scaleFactor)));
+        const newFontSize = Math.max(8, Math.min(180, Math.round(initialFontSize * scaleFactor)));
+        handleUpdateTemplateBox(selectedBoxId, { fontSize: newFontSize });
+        break;
+      }
+
+      case 'ne': {
+        // Corner top-right: proportional scale (scales font size)
+        const scaleFactor = Math.max(0.2, (dragStart.boxW + deltaX) / dragStart.boxW);
+        newW = Math.max(10, Math.min(100 - dragStart.boxX, Math.round(dragStart.boxW * scaleFactor)));
+        newY = Math.max(0, Math.min(95, Math.round(dragStart.boxY + deltaY)));
+        const newFontSize = Math.max(8, Math.min(180, Math.round(initialFontSize * scaleFactor)));
+        handleUpdateTemplateBox(selectedBoxId, { fontSize: newFontSize });
+        break;
+      }
+
+      case 'sw': {
+        // Corner bottom-left: proportional scale (scales font size)
+        const scaleFactor = Math.max(0.2, (dragStart.boxW - deltaX) / dragStart.boxW);
+        newW = Math.max(10, Math.round(dragStart.boxW * scaleFactor));
+        newX = Math.max(0, Math.min(dragStart.boxX + dragStart.boxW - 10, Math.round(dragStart.boxX + dragStart.boxW - newW)));
+        const newFontSize = Math.max(8, Math.min(180, Math.round(initialFontSize * scaleFactor)));
+        handleUpdateTemplateBox(selectedBoxId, { fontSize: newFontSize });
+        break;
+      }
+
+      case 'nw': {
+        // Corner top-left: proportional scale (scales font size)
+        const scaleFactor = Math.max(0.2, (dragStart.boxW - deltaX) / dragStart.boxW);
+        newW = Math.max(10, Math.round(dragStart.boxW * scaleFactor));
+        newX = Math.max(0, Math.min(dragStart.boxX + dragStart.boxW - 10, Math.round(dragStart.boxX + dragStart.boxW - newW)));
+        newY = Math.max(0, Math.min(95, Math.round(dragStart.boxY + deltaY)));
+        const newFontSize = Math.max(8, Math.min(180, Math.round(initialFontSize * scaleFactor)));
+        handleUpdateTemplateBox(selectedBoxId, { fontSize: newFontSize });
+        break;
+      }
     }
 
     if (isSnapToGrid) {
@@ -1183,9 +1468,34 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
   const editingLayout = getEditingBoxLayout();
 
+  // Floating quick-action toolbar position directly underneath selected box (BUG-011)
+  const getSelectedBoxToolbarPosition = () => {
+    if (!selectedBox || editingRichBoxId || !canvasRef.current || !canvasContainerRef.current || !activePage) return null;
+    const canvasEl = canvasRef.current;
+    const containerEl = canvasContainerRef.current;
+    const canvasRect = canvasEl.getBoundingClientRect();
+    const containerRect = containerEl.getBoundingClientRect();
+    const ctx = canvasEl.getContext('2d');
+    if (!ctx) return null;
+
+    const layout = computeTextBoxLayout(ctx, selectedBox, activePage, canvasRect.width, canvasRect.height);
+    const canvasLeft = canvasRect.left - containerRect.left;
+    const canvasTop = canvasRect.top - containerRect.top;
+
+    const centerX = Math.round(canvasLeft + layout.boxX + layout.boxW / 2);
+    const bottomY = Math.round(Math.min(canvasTop + layout.boxY + layout.computedHeightPx + 12, containerRect.height - 52));
+
+    return {
+      centerX,
+      bottomY,
+    };
+  };
+
+  const selectedBoxToolbarPos = getSelectedBoxToolbarPosition();
+
   return (
     <div className="h-[100dvh] bg-[#E5B224] text-black flex flex-col font-sans select-none overflow-hidden overscroll-none relative">
-      {/* 1. TOP APP BAR (Exact match to IMG_1495 (2).pdf Pages 2-5) */}
+      {/* 1. TOP APP BAR (BUG-004: Clean header with project title, no oval pagination pill) */}
       <header className="border-b border-[#212128] bg-[#0B0B0F] text-white shrink-0 z-30 px-3 sm:px-6 py-2.5 flex items-center justify-between gap-3 shadow-md">
         {/* Left: Circular Home Button & In-Memory Undo / Redo */}
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
@@ -1217,37 +1527,11 @@ export const Workspace: React.FC<WorkspaceProps> = ({
           </div>
         </div>
 
-        {/* Center: Pagination & Project Title */}
-        <div className="flex items-center gap-2">
-          {project.pages.length > 0 && (
-            <div className="flex items-center gap-1.5 bg-black/60 border border-white/10 px-3 py-1 rounded-full">
-              <button
-                onClick={() => handleSelectPage(Math.max(0, activePageIndex - 1))}
-                disabled={activePageIndex === 0}
-                className="text-white/70 hover:text-white disabled:opacity-30 p-0.5"
-                title="Previous Design"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-
-              <span className="text-xs font-mono font-bold text-[#E5B224] tracking-wide">
-                Design {activePageIndex + 1} of {project.pages.length}
-              </span>
-
-              <button
-                onClick={() =>
-                  handleSelectPage(
-                    Math.min(project.pages.length - 1, activePageIndex + 1)
-                  )
-                }
-                disabled={activePageIndex === project.pages.length - 1}
-                className="text-white/70 hover:text-white disabled:opacity-30 p-0.5"
-                title="Next Design"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-          )}
+        {/* Center: Project Title (BUG-004: Oval pill removed, project title displayed) */}
+        <div className="flex items-center gap-2 truncate max-w-[180px] sm:max-w-xs md:max-w-md">
+          <span className="text-sm font-bold text-[#E5B224] tracking-wide truncate">
+            {project.name || 'Untitled Project'}
+          </span>
         </div>
 
         {/* Right: Designs (3-bar strip toggle), Download, Share */}
@@ -1351,43 +1635,30 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       <div className="flex-1 flex flex-col lg:flex-row max-w-7xl w-full mx-auto p-2 sm:p-4 gap-4 overflow-y-auto pb-24">
         {/* Left / Center Area: Canvas & Pagination */}
         <div className="flex-1 flex flex-col items-center justify-start space-y-2.5 min-w-0">
-          {/* Pagination Controls */}
-          {project.pages.length > 0 && (
-            <div className="flex items-center justify-between w-full max-w-lg px-2">
-              <button
-                onClick={() => handleSelectPage(Math.max(0, activePageIndex - 1))}
-                disabled={activePageIndex === 0}
-                className="p-2 rounded-xl bg-[#17171C] border border-[#262632] text-[#FFF8E7]/70 hover:text-white disabled:opacity-30 transition-all min-h-[44px] min-w-[44px] flex items-center justify-center"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-
-              <div className="flex flex-col items-center">
-                <span className="text-xs font-mono font-bold text-[#D4AF37]">
-                  Design {activePageIndex + 1} of {project.pages.length}
-                </span>
-                <span className="text-[10px] text-[#FFF8E7]/40 truncate max-w-[180px]">
-                  {activePage ? activePage.name : ''}
-                </span>
-              </div>
-
-              <button
-                onClick={() =>
-                  handleSelectPage(
-                    Math.min(project.pages.length - 1, activePageIndex + 1)
-                  )
-                }
-                disabled={activePageIndex === project.pages.length - 1}
-                className="p-2 rounded-xl bg-[#17171C] border border-[#262632] text-[#FFF8E7]/70 hover:text-white disabled:opacity-30 transition-all min-h-[44px] min-w-[44px] flex items-center justify-center"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-          )}
-
           {/* Interactive Canvas Container with Auto-Height Box Layout */}
           <div
             ref={canvasContainerRef}
+            onTouchStart={(e) => {
+              if (activeHandle) return;
+              touchStartXRef.current = e.touches[0].clientX;
+              touchStartYRef.current = e.touches[0].clientY;
+            }}
+            onTouchEnd={(e) => {
+              if (activeHandle || touchStartXRef.current === null || touchStartYRef.current === null) return;
+              const deltaX = e.changedTouches[0].clientX - touchStartXRef.current;
+              const deltaY = e.changedTouches[0].clientY - touchStartYRef.current;
+              touchStartXRef.current = null;
+              touchStartYRef.current = null;
+
+              // Horizontal swipe must dominate vertical scroll
+              if (Math.abs(deltaX) > 40 && Math.abs(deltaX) > Math.abs(deltaY) * 1.5) {
+                if (deltaX < 0 && activePageIndex < project.pages.length - 1) {
+                  handleSelectPage(activePageIndex + 1);
+                } else if (deltaX > 0 && activePageIndex > 0) {
+                  handleSelectPage(activePageIndex - 1);
+                }
+              }
+            }}
             style={{ transform: 'translateZ(0)', backfaceVisibility: 'hidden' }}
             className="w-full max-w-lg bg-[#121217] border border-[#262632] rounded-2xl overflow-hidden shadow-2xl relative flex items-center justify-center min-h-[320px] crisp-render"
           >
@@ -1433,6 +1704,68 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                   className="workspace-canvas crisp-render cursor-move max-w-full h-auto rounded-xl shadow-lg"
                 />
 
+                {/* Floating Quick-Action Toolbar centered directly underneath selected box (BUG-011) */}
+                {selectedBox && !editingRichBoxId && selectedBoxToolbarPos && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      left: `${selectedBoxToolbarPos.centerX}px`,
+                      top: `${selectedBoxToolbarPos.bottomY}px`,
+                      transform: 'translateX(-50%)',
+                      zIndex: 35,
+                    }}
+                    className="bg-[#0B0B0F]/95 backdrop-blur-md border border-[#D4AF37]/60 rounded-full px-2 py-1 shadow-2xl flex items-center gap-1 animate-in fade-in zoom-in-95 pointer-events-auto"
+                  >
+                    {/* Duplicate */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDuplicateSelectedBox();
+                      }}
+                      className="p-1.5 rounded-full text-white/80 hover:text-[#E5B224] hover:bg-white/10 active:scale-95 transition-all"
+                      title="Duplicate Element"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+
+                    {/* Delete */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteSelectedBox();
+                      }}
+                      className="p-1.5 rounded-full text-white/80 hover:text-red-400 hover:bg-white/10 active:scale-95 transition-all"
+                      title="Delete Element"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+
+                    {/* Nudge */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveSelectedTool(activeSelectedTool === 'format' ? null : 'format');
+                      }}
+                      className="p-1.5 rounded-full text-white/80 hover:text-[#E5B224] hover:bg-white/10 active:scale-95 transition-all"
+                      title="Nudge Position"
+                    >
+                      <Move className="w-3.5 h-3.5" />
+                    </button>
+
+                    {/* Rotate */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleRotateSelectedBox(90);
+                      }}
+                      className="p-1.5 rounded-full text-white/80 hover:text-[#E5B224] hover:bg-white/10 active:scale-95 transition-all"
+                      title="Rotate 90°"
+                    >
+                      <RotateCw className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+
                 {/* Double-tap in-place rich text editor overlay */}
                 {editingLayout && (
                   <RichTextOverlay
@@ -1453,6 +1786,53 @@ export const Workspace: React.FC<WorkspaceProps> = ({
               </div>
             )}
           </div>
+
+          {/* Relative 3-Circle Progress Indicator (BUG-005) */}
+          {project.pages.length > 0 && (
+            <div className="flex flex-col items-center justify-center gap-1.5 py-1">
+              <div className="flex items-center gap-3">
+                {/* Left circle: previous design */}
+                <button
+                  onClick={() => handleSelectPage(Math.max(0, activePageIndex - 1))}
+                  disabled={activePageIndex === 0}
+                  className={`transition-all ${
+                    activePageIndex > 0
+                      ? 'w-2.5 h-2.5 rounded-full bg-black/60 hover:bg-black hover:scale-125'
+                      : 'w-2.5 h-2.5 rounded-full border border-black/25 opacity-40 cursor-default'
+                  }`}
+                  title="Previous Design"
+                />
+
+                {/* Center circle: active design */}
+                <div
+                  className="w-3.5 h-3.5 rounded-full bg-black shadow-md shadow-black/30 ring-2 ring-black/20"
+                  title={`Active Design ${activePageIndex + 1}`}
+                />
+
+                {/* Right circle: next design */}
+                <button
+                  onClick={() => handleSelectPage(Math.min(project.pages.length - 1, activePageIndex + 1))}
+                  disabled={activePageIndex === project.pages.length - 1}
+                  className={`transition-all ${
+                    activePageIndex < project.pages.length - 1
+                      ? 'w-2.5 h-2.5 rounded-full bg-black/60 hover:bg-black hover:scale-125'
+                      : 'w-2.5 h-2.5 rounded-full border border-black/25 opacity-40 cursor-default'
+                  }`}
+                  title="Next Design"
+                />
+              </div>
+
+              <div className="flex items-center gap-1.5 text-black/80 font-mono text-[11px] font-bold">
+                <span>Design {activePageIndex + 1} of {project.pages.length}</span>
+                {activePage?.name && (
+                  <>
+                    <span className="opacity-40">•</span>
+                    <span className="opacity-70 truncate max-w-[150px] font-sans font-medium">{activePage.name}</span>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Right Area: Text Field Editors & Style Panel */}
@@ -2198,23 +2578,94 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                     </button>
                   ))}
                 </div>
+
+                {/* 4-Way Nudge Controls (BUG-011, BUG-012) */}
+                <div className="pt-2 border-t border-[#333342]/60">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[11px] font-bold text-[#E5B224]">Nudge Position</span>
+                    <span className="text-[10px] text-white/50">1% per tap</span>
+                  </div>
+                  <div className="flex items-center justify-center gap-2">
+                    <button
+                      onClick={() => handleNudgeSelectedBox(-1, 0)}
+                      className="p-2 bg-[#17171C] hover:bg-[#262632] border border-[#333342] rounded-lg text-white font-bold min-w-[36px] min-h-[36px] flex items-center justify-center"
+                      title="Nudge Left"
+                    >
+                      ←
+                    </button>
+                    <div className="flex flex-col gap-1">
+                      <button
+                        onClick={() => handleNudgeSelectedBox(0, -1)}
+                        className="p-2 bg-[#17171C] hover:bg-[#262632] border border-[#333342] rounded-lg text-white font-bold min-w-[36px] min-h-[36px] flex items-center justify-center"
+                        title="Nudge Up"
+                      >
+                        ↑
+                      </button>
+                      <button
+                        onClick={() => handleNudgeSelectedBox(0, 1)}
+                        className="p-2 bg-[#17171C] hover:bg-[#262632] border border-[#333342] rounded-lg text-white font-bold min-w-[36px] min-h-[36px] flex items-center justify-center"
+                        title="Nudge Down"
+                      >
+                        ↓
+                      </button>
+                    </div>
+                    <button
+                      onClick={() => handleNudgeSelectedBox(1, 0)}
+                      className="p-2 bg-[#17171C] hover:bg-[#262632] border border-[#333342] rounded-lg text-white font-bold min-w-[36px] min-h-[36px] flex items-center justify-center"
+                      title="Nudge Right"
+                    >
+                      →
+                    </button>
+                  </div>
+                </div>
+
+                {/* Rotation Control (BUG-011, BUG-012) */}
+                <div className="pt-2 border-t border-[#333342]/60 flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-bold text-[#E5B224]">Rotation</span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => handleRotateSelectedBox(-15)}
+                      className="px-2 py-1 bg-[#17171C] hover:bg-[#262632] border border-[#333342] rounded-lg text-[11px] text-white"
+                      title="-15°"
+                    >
+                      -15°
+                    </button>
+                    <span className="text-xs font-mono font-bold text-[#E5B224] min-w-[36px] text-center">
+                      {selectedBox.rotation || 0}°
+                    </span>
+                    <button
+                      onClick={() => handleRotateSelectedBox(15)}
+                      className="px-2 py-1 bg-[#17171C] hover:bg-[#262632] border border-[#333342] rounded-lg text-[11px] text-white"
+                      title="+15°"
+                    >
+                      +15°
+                    </button>
+                    <button
+                      onClick={() => handleRotateSelectedBox(-(selectedBox.rotation || 0))}
+                      className="px-1.5 py-1 bg-red-950/40 border border-red-800 rounded-lg text-[10px] text-red-300"
+                      title="Reset rotation to 0°"
+                    >
+                      Reset
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
           </div>
         )}
 
-        {/* Upload Sub-Popup (When Upload button is clicked in unselected dock) */}
+        {/* Upload Sub-Popup (BUG-008: Batch, Single, and Image Overlay) */}
         {isUploadMenuOpen && !selectedBoxId && (
-          <div className="mb-2 bg-[#0B0B0F] border-2 border-[#D4AF37]/50 rounded-2xl p-3 shadow-2xl text-white flex items-center gap-2 animate-in slide-in-from-bottom-2 max-w-xs mx-auto">
+          <div className="mb-2 bg-[#0B0B0F] border-2 border-[#D4AF37]/50 rounded-2xl p-2.5 shadow-2xl text-white flex items-center gap-2 animate-in slide-in-from-bottom-2 max-w-sm mx-auto">
             <button
               onClick={() => {
                 setIsUploadMenuOpen(false);
                 batchUploadRef.current?.click();
               }}
-              className="flex-1 py-2 bg-[#E5B224] text-black text-xs font-bold rounded-xl flex items-center justify-center gap-1.5"
+              className="flex-1 py-2 bg-[#E5B224] text-black text-xs font-bold rounded-xl flex items-center justify-center gap-1"
             >
               <Upload className="w-3.5 h-3.5" />
-              <span>Batch Upload</span>
+              <span>Batch</span>
             </button>
             <button
               onClick={() => {
@@ -2226,6 +2677,16 @@ export const Workspace: React.FC<WorkspaceProps> = ({
               <Plus className="w-3.5 h-3.5 text-[#E5B224]" />
               <span>Single</span>
             </button>
+            <button
+              onClick={() => {
+                setIsUploadMenuOpen(false);
+                overlayUploadRef.current?.click();
+              }}
+              className="flex-1 py-2 bg-[#1C1C24] hover:bg-[#262632] border border-[#333342] text-white text-xs font-semibold rounded-xl flex items-center justify-center gap-1"
+            >
+              <ImageIcon className="w-3.5 h-3.5 text-[#E5B224]" />
+              <span>Overlay</span>
+            </button>
           </div>
         )}
 
@@ -2234,11 +2695,11 @@ export const Workspace: React.FC<WorkspaceProps> = ({
           {selectedBoxId === null ? (
             /* STATE A: UNSELECTED TEXT (Exact match to IMG_1495 (2).pdf Page 2) */
             <>
-              {/* [A Text] */}
+              {/* [A Text] (BUG-006: Opens Text Element panel) */}
               <button
-                onClick={() => setIsRightPanelOpen(!isRightPanelOpen)}
+                onClick={() => setIsAddPanelOpen(true)}
                 className="flex flex-col items-center justify-center px-2 py-1 rounded-xl text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24] transition-all min-w-[50px] min-h-[46px]"
-                title="Text Fields"
+                title="Add Text Fields"
               >
                 <Type className="w-4 h-4 text-[#E5B224]" />
                 <span className="text-[10px] font-bold mt-1">Text</span>
@@ -2248,7 +2709,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
               <button
                 onClick={() => setIsUploadMenuOpen(!isUploadMenuOpen)}
                 className="flex flex-col items-center justify-center px-2 py-1 rounded-xl text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24] transition-all min-w-[50px] min-h-[46px]"
-                title="Upload Backgrounds"
+                title="Upload Backgrounds or Overlays"
               >
                 <Upload className="w-4 h-4 text-[#E5B224]" />
                 <span className="text-[10px] font-bold mt-1">Upload</span>
@@ -2274,11 +2735,11 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                 <span className="text-[10px] font-bold mt-1 whitespace-nowrap">Sync Layout</span>
               </button>
 
-              {/* [+ Add] */}
+              {/* [+ Add] (BUG-007: Opens Shape & Visual Elements panel) */}
               <button
-                onClick={() => setIsAddPanelOpen(true)}
+                onClick={() => setIsShapePanelOpen(true)}
                 className="flex flex-col items-center justify-center px-2 py-1 rounded-xl text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24] transition-all min-w-[50px] min-h-[46px]"
-                title="Add Elements"
+                title="Add Shapes & Elements"
               >
                 <Plus className="w-4 h-4 text-[#E5B224]" />
                 <span className="text-[10px] font-bold mt-1">Add</span>
@@ -2401,7 +2862,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         </div>
       </div>
 
-      {/* Hidden File Inputs for Background Uploads */}
+      {/* Hidden File Inputs for Background Uploads & Overlays */}
       <input
         ref={batchUploadRef}
         type="file"
@@ -2415,6 +2876,13 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         type="file"
         accept="image/png, image/jpeg, image/jpg"
         onChange={(e) => handleUploadFiles(e.target.files)}
+        className="hidden"
+      />
+      <input
+        ref={overlayUploadRef}
+        type="file"
+        accept="image/png, image/jpeg, image/jpg, image/webp"
+        onChange={(e) => handleInsertImageOverlay(e.target.files)}
         className="hidden"
       />
 
@@ -2458,7 +2926,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         onClose={() => setIsSyncLayoutOpen(false)}
         onSyncAll={handleSyncAllPages}
         onSyncCustomPages={handleSyncCustomPages}
-        onSyncFieldToPages={handleSyncFieldToPages}
+        onSyncFieldsToPages={handleSyncFieldsToPages}
       />
 
       {/* Add Element Panel (IMG_1495 (2).pdf Page 17) */}
@@ -2467,6 +2935,13 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         onClose={() => setIsAddPanelOpen(false)}
         onAddTextBox={handleAddFromPanel}
         onApplyFontCombination={handleApplyFontCombination}
+      />
+
+      {/* Shape Panel Modal (BUG-007) */}
+      <ShapePanelModal
+        isOpen={isShapePanelOpen}
+        onClose={() => setIsShapePanelOpen(false)}
+        onSelectShape={handleInsertShape}
       />
 
       {/* More Menu Drawer (IMG_1495 (2).pdf Pages 19-20) */}

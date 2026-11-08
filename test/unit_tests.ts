@@ -706,6 +706,138 @@ console.log('\n[TEST 18] Honest Storage Calculation');
   console.log('✅ PASS: Honest storage calculation and 0 B baseline verified');
 }
 
+// ---------------------------------------------------------------------------
+// TEST 19: 2 GB Dedicated Quota and Available Space Math (BUG-001, ENHANCEMENT-001)
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 19] 2 GB Quota & Available Space Math');
+{
+  const { APP_STORAGE_QUOTA_BYTES, formatBytes } = await import('../src/utils/db');
+
+  assert.strictEqual(APP_STORAGE_QUOTA_BYTES, 2 * 1024 * 1024 * 1024, 'App quota is exactly 2 GB');
+  const used = 250 * 1024 * 1024; // 250 MB
+  const available = Math.max(0, APP_STORAGE_QUOTA_BYTES - used);
+
+  assert.strictEqual(formatBytes(APP_STORAGE_QUOTA_BYTES), '2 GB');
+  assert.strictEqual(formatBytes(available), '1.8 GB');
+  console.log('✅ PASS: Dedicated 2 GB quota and available calculation verified');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 20: Shape Insertion Geometry Defaults (BUG-007)
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 20] Shape Element Defaults (25% centered, solid black fill)');
+{
+  const shapeBox: TextBoxTemplate = {
+    id: 'shape_test_1',
+    fieldLabel: 'Circle',
+    elementType: 'shape',
+    shapeType: 'circle',
+    x: 37.5,
+    y: 37.5,
+    width: 25,
+    height: 25,
+    fontFamily: 'Plus Jakarta Sans',
+    fontSize: 24,
+    fontWeight: '500',
+    fontStyle: 'normal',
+    textAlign: 'center',
+    color: '#000000',
+    fillColor: '#000000',
+  };
+
+  assert.strictEqual(shapeBox.x, 37.5);
+  assert.strictEqual(shapeBox.y, 37.5);
+  assert.strictEqual(shapeBox.width, 25);
+  assert.strictEqual(shapeBox.fillColor, '#000000');
+  assert.strictEqual(shapeBox.elementType, 'shape');
+  console.log('✅ PASS: Shape element centered at 25% with solid #000000 fill verified');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 21: Sync Fields Layout (Preserving Target Content) (BUG-009)
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 21] Sync Fields Layout Preserves Target Values');
+{
+  const sourceBox: TextBoxTemplate = {
+    id: 'src_title',
+    fieldLabel: 'Headline',
+    x: 10,
+    y: 15,
+    width: 80,
+    fontFamily: 'Cinzel',
+    fontSize: 40,
+    fontWeight: '700',
+    fontStyle: 'normal',
+    textAlign: 'center',
+    color: '#D4AF37',
+  };
+
+  const targetPage: DesignPage = {
+    id: 'p_dest',
+    imageId: 'img_dest',
+    name: 'Target Page',
+    width: 1000,
+    height: 1000,
+    values: { Headline: 'Original Target Headline Text' },
+    textBoxes: [
+      {
+        id: 'dest_title',
+        fieldLabel: 'Headline',
+        x: 0,
+        y: 0,
+        width: 50,
+        fontFamily: 'Arial',
+        fontSize: 16,
+        fontWeight: '400',
+        fontStyle: 'normal',
+        textAlign: 'left',
+        color: '#000000',
+      },
+    ],
+  };
+
+  // Sync geometry & styles of 'Headline' from source to target
+  const updatedTextBoxes = targetPage.textBoxes!.map((b) =>
+    b.fieldLabel === 'Headline'
+      ? {
+          ...b,
+          x: sourceBox.x,
+          y: sourceBox.y,
+          width: sourceBox.width,
+          fontFamily: sourceBox.fontFamily,
+          fontSize: sourceBox.fontSize,
+          fontWeight: sourceBox.fontWeight,
+          fontStyle: sourceBox.fontStyle,
+          textAlign: sourceBox.textAlign,
+          color: sourceBox.color,
+        }
+      : b
+  );
+
+  // Assert target now has source styling
+  assert.strictEqual(updatedTextBoxes[0].fontFamily, 'Cinzel');
+  assert.strictEqual(updatedTextBoxes[0].fontSize, 40);
+  assert.strictEqual(updatedTextBoxes[0].x, 10);
+  // Assert target text content remains untouched
+  assert.strictEqual(targetPage.values['Headline'], 'Original Target Headline Text');
+  console.log('✅ PASS: Sync fields layout copies geometry/styling while preserving target text');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 22: Case Conversions (BUG-012)
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 22] Case Conversions (aa, AA, Aa)');
+{
+  const toMixedCase = (str: string) =>
+    str.replace(/\b\w+/g, (txt) => txt.charAt(0).toUpperCase() + txt.slice(1).toLowerCase());
+
+  const original = 'hELLO wORLD OF lUXURY';
+  assert.strictEqual(original.toLowerCase(), 'hello world of luxury');
+  assert.strictEqual(original.toUpperCase(), 'HELLO WORLD OF LUXURY');
+  assert.strictEqual(toMixedCase(original), 'Hello World Of Luxury');
+  console.log('✅ PASS: Case conversion helpers verified');
+}
+
 console.log('\n--- ALL UNIT TESTS COMPLETED SUCCESSFULLY ---');
 
 

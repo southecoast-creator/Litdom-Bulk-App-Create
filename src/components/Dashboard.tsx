@@ -21,9 +21,10 @@ import {
   Folder,
   Menu,
   Download,
-  Edit,
+  Edit3,
   Trash2,
   BookmarkPlus,
+  BookmarkX,
   AlertTriangle,
   X,
   Check,
@@ -34,14 +35,15 @@ import {
   saveProject,
   deleteProject,
   createDefaultTemplate,
-  getStorageEstimate,
   calculateExactStorageBreakdown,
   storeImageFile,
   formatBytes,
   saveSavedTemplate,
   getAllSavedTemplates,
+  deleteSavedTemplate,
   getThumbnailBlob,
   createManagedObjectUrl,
+  APP_STORAGE_QUOTA_BYTES,
 } from '../utils/db';
 import { DocxWorkflowModal } from './DocxWorkflowModal';
 import * as XLSX from 'xlsx';
@@ -99,15 +101,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
 
   const loadData = async () => {
     try {
-      const [list, breakdown, estimate, tpls] = await Promise.all([
+      const [list, breakdown, tpls] = await Promise.all([
         getAllProjects(),
         calculateExactStorageBreakdown(),
-        getStorageEstimate(),
         getAllSavedTemplates(),
       ]);
       setProjects(list);
       setStorageBreakdown(breakdown);
-      setStorageEstimate(estimate);
       setSavedTemplatesList(tpls);
 
       // Load thumbnail for first page of each project
@@ -130,6 +130,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
 
   useEffect(() => {
     loadData();
+    const handleClickOutside = () => setActiveMenuProjectId(null);
+    window.addEventListener('click', handleClickOutside);
+    return () => window.removeEventListener('click', handleClickOutside);
   }, []);
 
   // 1. Image Workflow: Single or Bulk Images Upload
@@ -319,10 +322,36 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
       await saveSavedTemplate(newTpl);
       const list = await getAllSavedTemplates();
       setSavedTemplatesList(list);
+      const breakdown = await calculateExactStorageBreakdown();
+      setStorageBreakdown(breakdown);
       showToast('Saved as reusable template!');
     } catch (err) {
       console.error('Error saving template:', err);
       showToast('Failed to save template.');
+    }
+  };
+
+  const handleRemoveFromTemplate = async (p: Project) => {
+    setActiveMenuProjectId(null);
+    const matchingTpl = savedTemplatesList.find(
+      (t) =>
+        t.name === `${p.name} Template` ||
+        (p.pages.length > 0 && t.imageId === p.pages[0].imageId)
+    );
+    if (!matchingTpl) {
+      showToast('This project is not currently saved as a template.');
+      return;
+    }
+    try {
+      await deleteSavedTemplate(matchingTpl.id);
+      const updatedList = await getAllSavedTemplates();
+      setSavedTemplatesList(updatedList);
+      const breakdown = await calculateExactStorageBreakdown();
+      setStorageBreakdown(breakdown);
+      showToast('Removed template from saved templates.');
+    } catch (err) {
+      console.error('Error removing template:', err);
+      showToast('Failed to remove template.');
     }
   };
 
@@ -479,10 +508,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
                 return (
                   <div
                     key={p.id}
-                    className="relative bg-[#16161D] border border-white/10 rounded-2xl overflow-hidden flex flex-col group hover:border-[#D4AF37] transition-all shadow-md"
+                    className={`relative bg-[#16161D] border border-white/10 rounded-2xl flex flex-col group hover:border-[#D4AF37] transition-all shadow-md ${
+                      isMenuOpen ? 'z-30' : 'z-10'
+                    }`}
                   >
                     {/* Project Card Header: Folder icon on left, 3-bar menu on right */}
-                    <div className="p-2.5 flex items-center justify-between bg-black/40 z-10">
+                    <div className="p-2.5 flex items-center justify-between bg-black/40 rounded-t-2xl z-10">
                       <Folder className="w-4 h-4 text-[#D4AF37]" />
                       <div className="relative">
                         <button
@@ -496,38 +527,45 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
                           <Menu className="w-4 h-4" />
                         </button>
 
-                        {/* 3-Bar Dropdown Menu: Exactly 4 options */}
+                        {/* 3-Bar Dropdown Menu: SVG icons and unclipped floating positioning */}
                         {isMenuOpen && (
                           <div
                             onClick={(e) => e.stopPropagation()}
-                            className="absolute right-0 top-7 z-30 w-44 bg-[#1E1E26] border border-[#D4AF37]/40 rounded-xl shadow-2xl py-1 text-xs text-[#FFF8E7]"
+                            className="absolute right-0 top-8 z-50 w-52 bg-[#1E1E26] border border-[#D4AF37]/50 rounded-2xl shadow-2xl py-1.5 text-xs text-[#FFF8E7] animate-in fade-in zoom-in-95 duration-150"
                           >
                             <button
                               onClick={() => {
                                 setActiveMenuProjectId(null);
                                 onOpenProject(p.id);
                               }}
-                              className="w-full text-left px-3 py-2 hover:bg-[#2A2A36] flex items-center gap-2"
+                              className="w-full text-left px-3.5 py-2 hover:bg-[#2A2A36] flex items-center gap-2.5 transition-colors"
                             >
-                              <Edit className="w-3.5 h-3.5 text-[#D4AF37]" />
-                              Edit
+                              <Edit3 className="w-4 h-4 text-[#D4AF37]" />
+                              <span>Edit</span>
                             </button>
                             <button
                               onClick={() => {
                                 setActiveMenuProjectId(null);
                                 onOpenProject(p.id);
                               }}
-                              className="w-full text-left px-3 py-2 hover:bg-[#2A2A36] flex items-center gap-2"
+                              className="w-full text-left px-3.5 py-2 hover:bg-[#2A2A36] flex items-center gap-2.5 transition-colors"
                             >
-                              <Download className="w-3.5 h-3.5 text-blue-400" />
-                              Download
+                              <Download className="w-4 h-4 text-blue-400" />
+                              <span>Download</span>
                             </button>
                             <button
                               onClick={() => handleSaveProjectAsTemplate(p)}
-                              className="w-full text-left px-3 py-2 hover:bg-[#2A2A36] flex items-center gap-2"
+                              className="w-full text-left px-3.5 py-2 hover:bg-[#2A2A36] flex items-center gap-2.5 transition-colors"
                             >
-                              <BookmarkPlus className="w-3.5 h-3.5 text-emerald-400" />
-                              Save as Template
+                              <BookmarkPlus className="w-4 h-4 text-emerald-400" />
+                              <span>Save as Template</span>
+                            </button>
+                            <button
+                              onClick={() => handleRemoveFromTemplate(p)}
+                              className="w-full text-left px-3.5 py-2 hover:bg-[#2A2A36] flex items-center gap-2.5 transition-colors"
+                            >
+                              <BookmarkX className="w-4 h-4 text-amber-400" />
+                              <span>Remove from Template</span>
                             </button>
                             <div className="h-px bg-white/10 my-1" />
                             <button
@@ -535,10 +573,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
                                 setActiveMenuProjectId(null);
                                 setProjectToDelete(p);
                               }}
-                              className="w-full text-left px-3 py-2 text-red-400 hover:bg-red-950/40 flex items-center gap-2"
+                              className="w-full text-left px-3.5 py-2 text-red-400 hover:bg-red-950/40 flex items-center gap-2.5 transition-colors"
                             >
-                              <Trash2 className="w-3.5 h-3.5 text-red-400" />
-                              Delete
+                              <Trash2 className="w-4 h-4 text-red-400" />
+                              <span>Delete</span>
                             </button>
                           </div>
                         )}
@@ -566,7 +604,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
                     {/* Project Title underneath */}
                     <div
                       onClick={() => onOpenProject(p.id)}
-                      className="p-2.5 text-center cursor-pointer bg-black/50"
+                      className="p-2.5 text-center cursor-pointer bg-black/50 rounded-b-2xl"
                     >
                       <h4 className="text-xs font-semibold text-white truncate" title={p.name}>
                         {p.name}
@@ -582,7 +620,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
           )}
         </section>
 
-        {/* 4. STORAGE SECTION (IMG_1495 (2).pdf Page 1) */}
+        {/* 4. STORAGE SECTION (IMG_1495 (2).pdf Page 1 & BUG-001 / ENHANCEMENT-001) */}
         <section className="bg-black/90 backdrop-blur-md rounded-3xl p-5 text-white shadow-xl flex flex-col gap-3">
           <div className="bg-[#B88E18]/80 text-white font-bold text-sm px-4 py-1.5 rounded-2xl w-fit shadow-sm">
             Storage
@@ -592,15 +630,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
             <div>
               <span className="text-white/80 font-normal">Used: </span>
               <span className="text-red-500 font-mono text-sm sm:text-base">
-                {storageBreakdown.totalBytes > 0
-                  ? formatBytes(storageBreakdown.totalBytes)
-                  : '250MB'}
+                {formatBytes(storageBreakdown.totalBytes)}
               </span>
             </div>
             <div>
               <span className="text-white/80 font-normal">Available: </span>
               <span className="text-emerald-400 font-mono text-sm sm:text-base">
-                {formatBytes(Math.max(0, storageEstimate.quotaBytes - storageBreakdown.totalBytes))}
+                {formatBytes(Math.max(0, APP_STORAGE_QUOTA_BYTES - storageBreakdown.totalBytes))}
               </span>
             </div>
           </div>
@@ -610,23 +646,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
             <div
               className="h-full bg-gradient-to-r from-yellow-500 to-emerald-400 rounded-full transition-all duration-500"
               style={{
-                width: `${Math.max(5, Math.min(100, (storageBreakdown.totalBytes / (storageEstimate.quotaBytes || 1073741824)) * 100))}%`,
+                width: `${Math.max(storageBreakdown.totalBytes > 0 ? 2 : 0, Math.min(100, (storageBreakdown.totalBytes / APP_STORAGE_QUOTA_BYTES) * 100))}%`,
               }}
             />
           </div>
 
-          <p className="text-[10px] text-white/50 text-center leading-tight pt-1">
-            Illustrative storage values and images for project previews not actual measurements
-          </p>
+          <div className="flex items-center justify-between text-[10px] text-white/50 pt-0.5">
+            <span>Dedicated App Storage (2.00 GB Quota)</span>
+            <span>{((storageBreakdown.totalBytes / APP_STORAGE_QUOTA_BYTES) * 100).toFixed(1)}% used</span>
+          </div>
         </section>
-
-        {/* Carousel Dots at Bottom of Screen (Page 1) */}
-        <div className="flex items-center justify-center gap-1.5 pt-2 pb-4">
-          <span className="w-2 h-2 rounded-full bg-black" />
-          <span className="w-2 h-2 rounded-full bg-black/40" />
-          <span className="w-2 h-2 rounded-full bg-black/40" />
-          <span className="w-2 h-2 rounded-full bg-black/40" />
-        </div>
       </main>
 
       {/* Delete Confirmation Modal */}

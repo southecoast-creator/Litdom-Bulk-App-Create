@@ -20,6 +20,8 @@ import {
   Sliders,
   CheckSquare,
   Square,
+  Image as ImageIcon,
+  FileText,
 } from 'lucide-react';
 import { Project, PdfExportSettings } from '../types';
 import {
@@ -209,7 +211,14 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
         {/* 1. File Type Selector Dropdown (Page 6 & 7) */}
         <div className="flex flex-col gap-1.5 pt-2">
           <label className="text-xs font-semibold text-black/80">File Type</label>
-          <div className="relative">
+          <div className="relative flex items-center">
+            <div className="absolute left-3.5 z-10 pointer-events-none text-[#D4AF37]">
+              {fileType === '.pdf' ? (
+                <FileText className="w-4 h-4" />
+              ) : (
+                <ImageIcon className="w-4 h-4" />
+              )}
+            </div>
             <select
               value={fileType}
               onChange={(e) => {
@@ -217,13 +226,13 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
                 setIsSizeEditOpen(false);
                 setIsPdfSettingsOpen(false);
               }}
-              className="w-full bg-black text-white font-bold text-sm px-4 py-3 rounded-2xl appearance-none pr-10 focus:outline-none cursor-pointer shadow-md"
+              className="w-full bg-black text-white font-bold text-sm pl-10 pr-10 py-3 rounded-2xl appearance-none focus:outline-none cursor-pointer shadow-md"
             >
-              <option value=".png">🖼️ .png</option>
-              <option value=".jpg">🖼️ .jpg</option>
-              <option value=".jpeg">🖼️ .jpeg</option>
-              <option value=".webp">🖼️ .webp</option>
-              <option value=".pdf">📄 .pdf</option>
+              <option value=".png">PNG Image (.png)</option>
+              <option value=".jpg">JPG Image (.jpg)</option>
+              <option value=".jpeg">JPEG Image (.jpeg)</option>
+              <option value=".webp">WebP Image (.webp)</option>
+              <option value=".pdf">PDF Document (.pdf)</option>
             </select>
             <ChevronDown className="w-5 h-5 text-white absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
           </div>
