@@ -120,21 +120,21 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
           text: part,
           isWord,
           wordIndex: isWord ? wordCounter++ : -1,
-          bold: run.bold !== undefined ? run.bold : (box.fontWeight === '700' || box.fontWeight === '800'),
-          italic: run.italic !== undefined ? run.italic : box.fontStyle === 'italic',
+          bold: run.bold,
+          italic: run.italic,
           underline: run.underline,
           strike: run.strike,
-          color: run.color || box.color || '#FFF8E7',
-          fontFamily: run.fontFamily || box.fontFamily || 'Plus Jakarta Sans',
-          fontSize: run.fontSize !== undefined ? run.fontSize : box.fontSize,
-          letterSpacing: run.letterSpacing !== undefined ? run.letterSpacing : (box.letterSpacing || 0),
+          color: run.color,
+          fontFamily: run.fontFamily,
+          fontSize: run.fontSize,
+          letterSpacing: run.letterSpacing,
           effects: run.effects ? JSON.parse(JSON.stringify(run.effects)) : undefined,
         });
       }
     }
 
     return tokens;
-  }, [box, page.id]);
+  }, [box.fieldLabel, page.richValues, page.values, page.id]);
 
   const [tokens, setTokens] = useState<WordToken[]>(initialTokens);
 
@@ -197,11 +197,23 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
     return `${selectedTokens.length} words selected`;
   }, [selectedTokens, totalWords]);
 
-  // Selected styles inspection
-  const isSelectedBold = hasSelection && selectedTokens.every((t) => t.bold);
-  const isSelectedItalic = hasSelection && selectedTokens.every((t) => t.italic);
-  const isSelectedUnderline = hasSelection && selectedTokens.every((t) => t.underline);
-  const isSelectedStrike = hasSelection && selectedTokens.every((t) => t.strike);
+  // Selected styles inspection (resolving against box fallback so toggling is intuitive)
+  const isSelectedBold =
+    hasSelection &&
+    selectedTokens.every((t) =>
+      t.bold !== undefined ? t.bold : (box.fontWeight === '700' || box.fontWeight === '800')
+    );
+  const isSelectedItalic =
+    hasSelection &&
+    selectedTokens.every((t) =>
+      t.italic !== undefined ? t.italic : box.fontStyle === 'italic'
+    );
+  const isSelectedUnderline =
+    hasSelection &&
+    selectedTokens.every((t) => !!t.underline);
+  const isSelectedStrike =
+    hasSelection &&
+    selectedTokens.every((t) => !!t.strike);
 
   const selectedFont = useMemo(() => {
     if (!hasSelection) return box.fontFamily;
@@ -250,16 +262,17 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
         if (!token.text) continue;
         if (runs.length > 0) {
           const prev = runs[runs.length - 1];
+          // Merge adjacent runs only when their explicit overrides are identical
           const same =
-            (prev.bold ?? false) === (token.bold ?? false) &&
-            (prev.italic ?? false) === (token.italic ?? false) &&
-            (prev.underline ?? false) === (token.underline ?? false) &&
-            (prev.strike ?? false) === (token.strike ?? false) &&
-            (prev.color || box.color) === (token.color || box.color) &&
-            (prev.fontFamily || box.fontFamily) === (token.fontFamily || box.fontFamily) &&
-            (prev.fontSize || box.fontSize) === (token.fontSize || box.fontSize) &&
-            (prev.letterSpacing || 0) === (token.letterSpacing || 0) &&
-            JSON.stringify(prev.effects || {}) === JSON.stringify(token.effects || {});
+            prev.bold === token.bold &&
+            prev.italic === token.italic &&
+            prev.underline === token.underline &&
+            prev.strike === token.strike &&
+            prev.color === token.color &&
+            prev.fontFamily === token.fontFamily &&
+            prev.fontSize === token.fontSize &&
+            prev.letterSpacing === token.letterSpacing &&
+            JSON.stringify(prev.effects || null) === JSON.stringify(token.effects || null);
 
           if (same) {
             prev.text += token.text;
@@ -607,10 +620,10 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
 
           const isSelected = selectedWordIndices.has(token.wordIndex);
           const isAnchor = isRangeMode && rangeAnchorIndex === token.wordIndex;
-          const isB = token.bold;
-          const isI = token.italic;
-          const isU = token.underline;
-          const isS = token.strike;
+          const isB = token.bold !== undefined ? token.bold : (box.fontWeight === '700' || box.fontWeight === '800');
+          const isI = token.italic !== undefined ? token.italic : box.fontStyle === 'italic';
+          const isU = !!token.underline;
+          const isS = !!token.strike;
           const color = token.color || box.color || '#FFF8E7';
           const fontFamily = token.fontFamily || box.fontFamily || 'Plus Jakarta Sans';
           const fontSizePx = Math.round((token.fontSize || box.fontSize) * scale);

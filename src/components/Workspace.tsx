@@ -47,6 +47,7 @@ import {
   Image as ImageIcon,
   Feather,
   RotateCw,
+  RotateCcw,
   Move,
   ArrowUp,
   ArrowDown,
@@ -197,35 +198,91 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   const selectedBox: TextBoxTemplate | undefined =
     selectedBoxId ? activeBoxes.find((b) => b.id === selectedBoxId) : undefined;
 
-  // Helper to push history snapshot before mutations
-  const recordHistory = useCallback((projToSave: Project) => {
-    setUndoStack((prev) => [...prev.slice(-30), JSON.parse(JSON.stringify(projToSave))]);
+  // History gesture / burst grouping state
+  const isGestureActiveRef = useRef<boolean>(false);
+  const gestureTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Helper to push history snapshot before mutations (grouped by gesture or 400ms idle bursts)
+  const recordHistory = useCallback((projToSave: Project, force: boolean = false) => {
+    // If a continuous gesture is active and not forced, do not push duplicate snapshots
+    if (!force && isGestureActiveRef.current) {
+      if (gestureTimeoutRef.current) clearTimeout(gestureTimeoutRef.current);
+      gestureTimeoutRef.current = setTimeout(() => {
+        isGestureActiveRef.current = false;
+      }, 400);
+      return;
+    }
+
+    setUndoStack((prev) => {
+      // Check if new snapshot is structurally identical to the top of the stack
+      const last = prev[prev.length - 1];
+      if (last && JSON.stringify(last) === JSON.stringify(projToSave)) {
+        return prev;
+      }
+      return [...prev.slice(-100), JSON.parse(JSON.stringify(projToSave))];
+    });
     setRedoStack([]);
+
+    isGestureActiveRef.current = true;
+    if (gestureTimeoutRef.current) clearTimeout(gestureTimeoutRef.current);
+    gestureTimeoutRef.current = setTimeout(() => {
+      isGestureActiveRef.current = false;
+    }, 400);
   }, []);
 
   // Undo Handler
   const handleUndo = useCallback(() => {
     if (undoStack.length === 0) return;
+
+    // Clear any pending debounced auto-save immediately to prevent overwriting undone state
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+
     const previous = undoStack[undoStack.length - 1];
     const newUndoStack = undoStack.slice(0, -1);
-    setRedoStack((prev) => [JSON.parse(JSON.stringify(project)), ...prev]);
+    setRedoStack((prev) => [JSON.parse(JSON.stringify(project)), ...prev.slice(-100)]);
     setUndoStack(newUndoStack);
+
+    // If Mode B rich-text overlay is open, close it cleanly to keep in sync with restored state
+    if (editingRichBoxId) {
+      setEditingRichBoxId(null);
+    }
+
     onUpdateProject(previous);
-    saveProject(previous).catch(console.error);
+    saveProject(previous).then(() => {
+      setSaveStatus('saved');
+    }).catch(console.error);
     showToast('Undo');
-  }, [undoStack, project, onUpdateProject]);
+  }, [undoStack, project, onUpdateProject, editingRichBoxId]);
 
   // Redo Handler
   const handleRedo = useCallback(() => {
     if (redoStack.length === 0) return;
+
+    // Clear any pending debounced auto-save immediately to prevent overwriting redone state
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+
     const next = redoStack[0];
     const newRedoStack = redoStack.slice(1);
-    setUndoStack((prev) => [...prev, JSON.parse(JSON.stringify(project))]);
+    setUndoStack((prev) => [...prev.slice(-100), JSON.parse(JSON.stringify(project))]);
     setRedoStack(newRedoStack);
+
+    // If Mode B rich-text overlay is open, close it cleanly to keep in sync with restored state
+    if (editingRichBoxId) {
+      setEditingRichBoxId(null);
+    }
+
     onUpdateProject(next);
-    saveProject(next).catch(console.error);
+    saveProject(next).then(() => {
+      setSaveStatus('saved');
+    }).catch(console.error);
     showToast('Redo');
-  }, [redoStack, project, onUpdateProject]);
+  }, [redoStack, project, onUpdateProject, editingRichBoxId]);
 
   // Keyboard Shortcuts for Undo & Redo (Cmd+Z / Ctrl+Z / Cmd+Shift+Z / Ctrl+Y)
   useEffect(() => {
@@ -2731,6 +2788,43 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                     </button>
                   </div>
                 </div>
+
+                {/* Reset words to match box (Clear Mode B rich overrides) */}
+                {activePage?.richValues && activePage.richValues[selectedBox.fieldLabel] && activePage.richValues[selectedBox.fieldLabel].length > 0 && (
+                  <div className="pt-2 border-t border-[#333342]/60">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        recordHistory(project, true);
+                        const rawText = activePage.values[selectedBox.fieldLabel] !== undefined
+                          ? activePage.values[selectedBox.fieldLabel]
+                          : selectedBox.fieldLabel;
+                        const updatedPages = project.pages.map((p, idx) => {
+                          if (idx !== activePageIndex) return p;
+                          const newRich = { ...(p.richValues || {}) };
+                          delete newRich[selectedBox.fieldLabel];
+                          return {
+                            ...p,
+                            richValues: newRich,
+                            values: { ...p.values, [selectedBox.fieldLabel]: rawText },
+                          };
+                        });
+                        const updatedProj: Project = {
+                          ...project,
+                          pages: updatedPages,
+                          updatedAt: Date.now(),
+                        };
+                        onUpdateProject(updatedProj);
+                        triggerAutoSave(updatedProj);
+                        showToast('Reset words to match box styling');
+                      }}
+                      className="w-full py-2 px-3 bg-[#17171C] hover:bg-[#262632] border border-[#D4AF37]/40 text-[#D4AF37] hover:text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>Reset words to match box</span>
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>
