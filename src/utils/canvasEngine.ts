@@ -209,10 +209,16 @@ function tokenizeRuns(
     const underline = !!run.underline;
     const strike = !!run.strike;
 
-    const effects: TextRunEffect | undefined = run.effects || (box.shadow || box.stroke ? {
+    const mergedEffects: TextRunEffect | undefined = run.effects || box.effects ? {
+      ...(box.effects || {}),
+      ...(box.shadow ? { shadow: { enabled: true, ...box.shadow } } : {}),
+      ...(box.stroke ? { outline: { enabled: true, ...box.stroke } } : {}),
+      ...(run.effects || {}),
+    } : (box.shadow || box.stroke ? {
       shadow: box.shadow ? { enabled: true, ...box.shadow } : undefined,
       outline: box.stroke ? { enabled: true, ...box.stroke } : undefined,
     } : undefined);
+    const effects = mergedEffects;
 
     // Apply font to context to measure accurately
     if (ctx) {
@@ -462,7 +468,12 @@ function drawStyledTokenWithEffects(
   scale: number,
   box: TextBoxTemplate
 ) {
-  const effects = token.effects || {};
+  const effects = {
+    ...(box.effects || {}),
+    ...(box.shadow ? { shadow: { enabled: true, ...box.shadow } } : {}),
+    ...(box.stroke ? { outline: { enabled: true, ...box.stroke } } : {}),
+    ...(token.effects || {}),
+  };
   const rand = getSeededRandom(hashString(token.text + token.fontSize));
 
   ctx.save();
@@ -684,8 +695,17 @@ function drawStyledTokenWithEffects(
       tokenX + Math.cos(angleRad) * token.width,
       baselineY + Math.sin(angleRad) * token.fontSize
     );
-    grad.addColorStop(0, effects.gradient.color || token.color || '#D4AF37');
-    grad.addColorStop(1, effects.gradient.color2 || '#FFFFFF');
+    const c1 = effects.gradient.color || token.color || '#D4AF37';
+    const c2 = effects.gradient.color2 || '#FFFFFF';
+    const c3 = effects.gradient.color3;
+
+    grad.addColorStop(0, c1);
+    if (c3) {
+      grad.addColorStop(0.5, c2);
+      grad.addColorStop(1, c3);
+    } else {
+      grad.addColorStop(1, c2);
+    }
     ctx.fillStyle = grad;
     ctx.fillText(token.text, tokenX, baselineY);
     ctx.restore();
@@ -1039,6 +1059,7 @@ export function drawTable(
 export interface RenderCanvasOptions {
   showBoundingBoxes?: boolean;
   selectedBoxId?: string | null;
+  editingBoxId?: string | null;
   targetWidth?: number; // Screen-res preview width
   targetHeight?: number;
   dpr?: number; // Optional explicit DPR multiplier (defaults to window.devicePixelRatio)
@@ -1162,6 +1183,12 @@ export async function renderDesignToCanvas(
       }
     } else {
       // Standard Text Box
+      // If user is actively editing this box in-place, skip canvas drawing to eliminate double layering!
+      if (options.editingBoxId && box.id === options.editingBoxId) {
+        ctx.restore();
+        continue;
+      }
+
       if (box.fill && box.fill.opacity > 0) {
         ctx.fillStyle = box.fill.color;
         ctx.globalAlpha = box.fill.opacity;

@@ -138,8 +138,14 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
 
   const [tokens, setTokens] = useState<WordToken[]>(initialTokens);
 
-  // Selected word indices (e.g. Set of wordIndex numbers)
-  const [selectedWordIndices, setSelectedWordIndices] = useState<Set<number>>(new Set());
+  // Selected word indices: All text is initially selected on entry (Test B / Mode B)
+  const [selectedWordIndices, setSelectedWordIndices] = useState<Set<number>>(() => {
+    const all = new Set<number>();
+    for (const t of initialTokens) {
+      if (t.isWord && t.wordIndex >= 0) all.add(t.wordIndex);
+    }
+    return all;
+  });
   const [lastTappedWordIndex, setLastTappedWordIndex] = useState<number | null>(null);
   const [isRangeMode, setIsRangeMode] = useState<boolean>(false);
   const [rangeAnchorIndex, setRangeAnchorIndex] = useState<number | null>(null);
@@ -663,18 +669,16 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
       >
         {/* Header Bar: Status & Done */}
         <div className="flex items-center justify-between px-3.5 py-2 border-b border-[#212128] bg-[#17171C]/90 text-xs gap-2">
-          {/* Active Word Tag */}
+          {/* Clean selection status */}
           <div className="flex items-center gap-1.5 min-w-0">
             {hasSelection ? (
-              <span className="flex items-center gap-1.5 bg-[#D4AF37]/20 border border-[#D4AF37]/40 px-2.5 py-1 rounded-full text-[#D4AF37] font-bold truncate">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#D4AF37] animate-pulse" />
-                <span className="truncate max-w-[200px] sm:max-w-xs">
-                  {selectedWordSummary}
-                </span>
+              <span className="flex items-center gap-1.5 bg-[#D4AF37]/20 border border-[#D4AF37]/40 px-2.5 py-1 rounded-full text-[#D4AF37] font-semibold text-xs truncate">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#D4AF37]" />
+                <span>Text Selected</span>
               </span>
             ) : (
               <span className="text-[#FFF8E7]/60 italic flex items-center gap-1 text-[11px]">
-                👉 Tap words above or use selection tools below
+                Tap words above to format
               </span>
             )}
           </div>

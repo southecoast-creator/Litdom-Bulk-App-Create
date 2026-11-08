@@ -491,6 +491,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       {
         showBoundingBoxes: editingRichBoxId === null, // Hide canvas bounding box when in-place editor is open
         selectedBoxId,
+        editingBoxId: editingRichBoxId,
         targetWidth: targetW,
         targetHeight: targetH,
       }
@@ -1639,19 +1640,24 @@ export const Workspace: React.FC<WorkspaceProps> = ({
           <div
             ref={canvasContainerRef}
             onTouchStart={(e) => {
-              if (activeHandle) return;
+              // Swipe between pages only on empty background canvas when no element is selected or edited
+              if (activeHandle || selectedBoxId !== null || editingRichBoxId !== null) return;
               touchStartXRef.current = e.touches[0].clientX;
               touchStartYRef.current = e.touches[0].clientY;
             }}
             onTouchEnd={(e) => {
-              if (activeHandle || touchStartXRef.current === null || touchStartYRef.current === null) return;
+              if (activeHandle || selectedBoxId !== null || editingRichBoxId !== null || touchStartXRef.current === null || touchStartYRef.current === null) {
+                touchStartXRef.current = null;
+                touchStartYRef.current = null;
+                return;
+              }
               const deltaX = e.changedTouches[0].clientX - touchStartXRef.current;
               const deltaY = e.changedTouches[0].clientY - touchStartYRef.current;
               touchStartXRef.current = null;
               touchStartYRef.current = null;
 
-              // Horizontal swipe must dominate vertical scroll
-              if (Math.abs(deltaX) > 40 && Math.abs(deltaX) > Math.abs(deltaY) * 1.5) {
+              // Horizontal swipe must dominate vertical scroll and be deliberate (>60px)
+              if (Math.abs(deltaX) > 60 && Math.abs(deltaX) > Math.abs(deltaY) * 1.8) {
                 if (deltaX < 0 && activePageIndex < project.pages.length - 1) {
                   handleSelectPage(activePageIndex + 1);
                 } else if (deltaX > 0 && activePageIndex > 0) {
@@ -2360,7 +2366,24 @@ export const Workspace: React.FC<WorkspaceProps> = ({
               <div className="space-y-3">
                 <div className="flex items-center justify-between text-xs font-semibold">
                   <span>Size</span>
-                  <span className="font-mono text-[#E5B224]">{selectedBox.fontSize}px</span>
+                  <div className="flex items-center gap-1 bg-[#17171C] border border-[#2D2D38] px-2 py-0.5 rounded-lg focus-within:border-[#E5B224]">
+                    <input
+                      type="number"
+                      min={6}
+                      max={200}
+                      value={selectedBox.fontSize}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value, 10);
+                        if (!isNaN(val)) {
+                          const clamped = Math.min(200, Math.max(6, val));
+                          handleUpdateTemplateBox(selectedBox.id, { fontSize: clamped });
+                        }
+                      }}
+                      className="w-12 bg-transparent font-mono text-[#E5B224] text-xs font-bold text-right focus:outline-none"
+                      title="Type exact font size"
+                    />
+                    <span className="text-[10px] text-white/50">px</span>
+                  </div>
                 </div>
                 <div className="flex items-center gap-2">
                   <button
@@ -2482,7 +2505,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
             {activeSelectedTool === 'effects' && (
               <div className="space-y-3">
                 <div className="grid grid-cols-4 gap-1.5">
-                  {(['none', 'shadow', 'glow', 'outline', 'neon', 'hollow', 'highlight'] as const).map(
+                  {(['none', 'shadow', 'glow', 'outline', 'neon', 'hollow', 'highlight', 'gradient'] as const).map(
                     (effect) => (
                       <button
                         key={effect}
@@ -2494,17 +2517,22 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                             handleUpdateTemplateBox(selectedBox.id, {
                               effects: {
                                 ...currentEffects,
-                                shadow: effect === 'shadow' ? { blur: 8, color: '#000000', offsetX: 2, offsetY: 2 } : currentEffects.shadow,
-                                glow: effect === 'glow' ? { blur: 12, color: '#E5B224', opacity: 0.9 } : currentEffects.glow,
-                                outline: effect === 'outline' ? { width: 2, color: '#000000' } : currentEffects.outline,
-                                neon: effect === 'neon' ? { intensity: 1.5, color: '#00FFA3' } : currentEffects.neon,
-                                hollow: effect === 'hollow' ? { strokeWidth: 1.5, strokeColor: selectedBox.color } : currentEffects.hollow,
-                                highlight: effect === 'highlight' ? { color: '#FFE600', opacity: 0.6 } : currentEffects.highlight,
+                                shadow: effect === 'shadow' ? { enabled: true, blur: 8, color: '#000000', offsetX: 2, offsetY: 2 } : currentEffects.shadow,
+                                glow: effect === 'glow' ? { enabled: true, blur: 16, color: '#E5B224', opacity: 90, intensity: 75 } : currentEffects.glow,
+                                outline: effect === 'outline' ? { enabled: true, width: 2, color: '#000000' } : currentEffects.outline,
+                                neon: effect === 'neon' ? { enabled: true, intensity: 1.5, color: '#00FFA3', blur: 16 } : currentEffects.neon,
+                                hollow: effect === 'hollow' ? { enabled: true, strokeWidth: 1.5, strokeColor: selectedBox.color, color: selectedBox.color } : currentEffects.hollow,
+                                highlight: effect === 'highlight' ? { enabled: true, color: '#FFE600', opacity: 60 } : currentEffects.highlight,
+                                gradient: effect === 'gradient' ? { enabled: true, color: '#E5B224', color2: '#F43F5E', color3: '#3B82F6', angle: 90 } : currentEffects.gradient,
                               },
                             });
                           }
                         }}
-                        className="py-1.5 px-2 bg-[#17171C] hover:bg-[#262632] border border-[#333342] text-[11px] font-semibold rounded-lg capitalize text-center"
+                        className={`py-1.5 px-2 border text-[11px] font-semibold rounded-lg capitalize text-center transition-all ${
+                          selectedBox.effects && selectedBox.effects[effect]?.enabled
+                            ? 'bg-[#E5B224] text-black border-[#E5B224] font-bold shadow-md'
+                            : 'bg-[#17171C] hover:bg-[#262632] border-[#333342] text-white'
+                        }`}
                       >
                         {effect}
                       </button>
@@ -2517,6 +2545,60 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                     Reset
                   </button>
                 </div>
+
+                {/* 3-Colour Gradient Customizer in Mode A */}
+                {selectedBox.effects?.gradient?.enabled && (
+                  <div className="pt-2 border-t border-[#333342]/60 space-y-2">
+                    <div className="flex items-center justify-between text-xs font-semibold text-[#E5B224]">
+                      <span>3-Colour Gradient</span>
+                      <span className="text-[10px] text-white/50">{selectedBox.effects.gradient.angle ?? 90}°</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      <div className="flex flex-col items-center gap-1 bg-[#17171C] p-1.5 rounded-lg border border-[#333342]">
+                        <span className="text-[10px] text-white/60">Colour 1</span>
+                        <input
+                          type="color"
+                          value={selectedBox.effects.gradient.color || '#E5B224'}
+                          onChange={(e) => {
+                            const grad = { ...selectedBox.effects?.gradient, color: e.target.value, enabled: true };
+                            handleUpdateTemplateBox(selectedBox.id, {
+                              effects: { ...selectedBox.effects, gradient: grad },
+                            });
+                          }}
+                          className="w-7 h-7 rounded-full bg-transparent border-0 cursor-pointer"
+                        />
+                      </div>
+                      <div className="flex flex-col items-center gap-1 bg-[#17171C] p-1.5 rounded-lg border border-[#333342]">
+                        <span className="text-[10px] text-white/60">Colour 2</span>
+                        <input
+                          type="color"
+                          value={selectedBox.effects.gradient.color2 || '#F43F5E'}
+                          onChange={(e) => {
+                            const grad = { ...selectedBox.effects?.gradient, color2: e.target.value, enabled: true };
+                            handleUpdateTemplateBox(selectedBox.id, {
+                              effects: { ...selectedBox.effects, gradient: grad },
+                            });
+                          }}
+                          className="w-7 h-7 rounded-full bg-transparent border-0 cursor-pointer"
+                        />
+                      </div>
+                      <div className="flex flex-col items-center gap-1 bg-[#17171C] p-1.5 rounded-lg border border-[#333342]">
+                        <span className="text-[10px] text-white/60">Colour 3</span>
+                        <input
+                          type="color"
+                          value={selectedBox.effects.gradient.color3 || '#3B82F6'}
+                          onChange={(e) => {
+                            const grad = { ...selectedBox.effects?.gradient, color3: e.target.value, enabled: true };
+                            handleUpdateTemplateBox(selectedBox.id, {
+                              effects: { ...selectedBox.effects, gradient: grad },
+                            });
+                          }}
+                          className="w-7 h-7 rounded-full bg-transparent border-0 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

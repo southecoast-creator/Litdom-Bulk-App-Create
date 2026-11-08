@@ -9,6 +9,7 @@ export interface EffectItemSettings {
   intensity?: number; // 0 - 100
   color?: string;
   color2?: string;
+  color3?: string;
   angle?: number; // 0 - 360
   blur?: number; // 0 - 50
   opacity?: number; // 0 - 100
