@@ -62,6 +62,7 @@ import {
 import {
   saveProject,
   storeImageFile,
+  isImageFile,
   getThumbnailBlob,
   getPreviewImageBlob,
   createManagedObjectUrl,
@@ -210,7 +211,13 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   const gestureTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Helper to push history snapshot before mutations (grouped by gesture or 400ms idle bursts)
+  // True from pointer-down to pointer-up on the canvas, so one drag/resize is
+  // always ONE undo step, even if the finger pauses for longer than 400ms.
+  const isPointerGestureRef = useRef<boolean>(false);
+
   const recordHistory = useCallback((projToSave: Project, force: boolean = false) => {
+    if (!force && isPointerGestureRef.current) return;
+
     // If a continuous gesture is active and not forced, do not push duplicate snapshots
     if (!force && isGestureActiveRef.current) {
       if (gestureTimeoutRef.current) clearTimeout(gestureTimeoutRef.current);
@@ -247,6 +254,11 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       saveTimeoutRef.current = null;
     }
 
+    // Undo ends any open edit burst so the next edit is recorded as its own step
+    isGestureActiveRef.current = false;
+    isPointerGestureRef.current = false;
+    if (gestureTimeoutRef.current) clearTimeout(gestureTimeoutRef.current);
+
     const previous = undoStack[undoStack.length - 1];
     const newUndoStack = undoStack.slice(0, -1);
     setRedoStack((prev) => [JSON.parse(JSON.stringify(project)), ...prev.slice(-100)]);
@@ -273,6 +285,10 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       clearTimeout(saveTimeoutRef.current);
       saveTimeoutRef.current = null;
     }
+
+    isGestureActiveRef.current = false;
+    isPointerGestureRef.current = false;
+    if (gestureTimeoutRef.current) clearTimeout(gestureTimeoutRef.current);
 
     const next = redoStack[0];
     const newRedoStack = redoStack.slice(1);
@@ -633,6 +649,23 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   };
 
   const handleUpdateTemplateBox = handleUpdateStyle;
+
+  // Switch a box back to a solid fill. The renderer also falls back to
+  // box.effects.gradient, so that must be switched off too, otherwise the
+  // gradient keeps showing after tapping "Solid".
+  const solidFillUpdates = (
+    box: TextBoxTemplate,
+    extra: Partial<TextBoxTemplate> = {}
+  ): Partial<TextBoxTemplate> => {
+    const updates: Partial<TextBoxTemplate> = { ...extra, gradient: undefined };
+    if (box.effects?.gradient) {
+      updates.effects = {
+        ...box.effects,
+        gradient: { ...box.effects.gradient, enabled: false },
+      };
+    }
+    return updates;
+  };
 
   // Dragging/resizing text affects ONLY the current design (automatic height)
   const handleUpdateCurrentDesignBoxGeometry = (
@@ -1059,7 +1092,10 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   const handleInsertImageOverlay = async (files: FileList | null) => {
     if (!files || files.length === 0 || !activePage) return;
     const file = files[0];
-    if (!file.type.startsWith('image/')) return;
+    if (!isImageFile(file)) {
+      showToast('That file is not an image.');
+      return;
+    }
     recordHistory(project);
 
     try {
@@ -1203,14 +1239,21 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   // Upload Designs
   const handleUploadFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
+    // Copy to an array first: resetting the input (below) empties the live FileList
+    const fileArray = Array.from(files);
     recordHistory(project);
 
     const currentLayout = activeBoxes;
     const newPages: DesignPage[] = [];
+    let skipped = 0;
+    let failed = 0;
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      if (!file.type.startsWith('image/')) continue;
+    for (let i = 0; i < fileArray.length; i++) {
+      const file = fileArray[i];
+      if (!isImageFile(file)) {
+        skipped++;
+        continue;
+      }
 
       try {
         const stored = await storeImageFile(file);
@@ -1226,10 +1269,20 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         });
       } catch (err) {
         console.error('Failed to store uploaded design:', err);
+        failed++;
       }
     }
 
-    if (newPages.length === 0) return;
+    if (newPages.length === 0) {
+      showToast(
+        failed > 0
+          ? 'Could not read that image. Try a JPG or PNG.'
+          : skipped > 0
+          ? 'That file is not an image. Choose a JPG or PNG.'
+          : 'No image was added.'
+      );
+      return;
+    }
 
     let combinedPages = [...project.pages, ...newPages];
 
@@ -1250,7 +1303,10 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
     onUpdateProject(updatedProj);
     triggerAutoSave(updatedProj);
-    showToast(`${newPages.length} design${newPages.length > 1 ? 's' : ''} added`);
+    showToast(
+      `${newPages.length} design${newPages.length > 1 ? 's' : ''} added` +
+        (failed + skipped > 0 ? ` (${failed + skipped} skipped)` : '')
+    );
   };
 
   // Multi-Page Deletion in Thumbnail Strip
@@ -1281,6 +1337,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     e: React.PointerEvent<HTMLCanvasElement>
   ) => {
     recordHistory(project);
+    isPointerGestureRef.current = true;
     setSelectedBoxId(box.id);
     setActiveHandle(handle);
     setDragStart({
@@ -1486,6 +1543,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   };
 
   const handleCanvasPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    isPointerGestureRef.current = false;
     if (activeHandle) {
       setActiveHandle(null);
       setDragStart(null);
@@ -1763,6 +1821,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                   onPointerDown={handleCanvasPointerDown}
                   onPointerMove={handleCanvasPointerMove}
                   onPointerUp={handleCanvasPointerUp}
+                  onPointerCancel={handleCanvasPointerUp}
                   style={{
                     touchAction: activeHandle ? 'none' : 'pan-y pinch-zoom',
                     WebkitFontSmoothing: 'antialiased',
@@ -1784,7 +1843,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                       transform: 'translateX(-50%)',
                       zIndex: 35,
                     }}
-                    className="bg-[#0B0B0F]/95 backdrop-blur-md border border-[#D4AF37]/60 rounded-full px-2 py-1 shadow-2xl flex items-center gap-1 animate-in fade-in zoom-in-95 pointer-events-auto"
+                    className="bg-[#0B0B0F]/95 backdrop-blur-md border border-[#D4AF37]/60 rounded-full px-3 py-1.5 shadow-2xl flex items-center gap-2 animate-in fade-in zoom-in-95 pointer-events-auto"
                   >
                     {/* Duplicate */}
                     <button
@@ -1809,6 +1868,9 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
+
+                    {/* Divider keeps the destructive Delete away from Nudge */}
+                    <span className="w-px h-5 mx-1 bg-[#D4AF37]/40" aria-hidden="true" />
 
                     {/* Nudge */}
                     <button
@@ -2523,7 +2585,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      handleUpdateTemplateBox(selectedBox.id, { gradient: undefined });
+                      handleUpdateTemplateBox(selectedBox.id, solidFillUpdates(selectedBox));
                     }}
                     className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all ${
                       !selectedBox.gradient?.enabled
@@ -2571,7 +2633,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                           onChange={(e) => {
                             const val = e.target.value.trim();
                             if (/^[0-9A-Fa-f]{0,6}$/.test(val)) {
-                              handleUpdateTemplateBox(selectedBox.id, { color: '#' + val, gradient: undefined });
+                              handleUpdateTemplateBox(selectedBox.id, solidFillUpdates(selectedBox, { color: '#' + val }));
                             }
                           }}
                           className="w-16 bg-transparent text-xs font-mono text-white focus:outline-none uppercase"
@@ -2595,7 +2657,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                         <button
                           key={hex}
                           type="button"
-                          onClick={() => handleUpdateTemplateBox(selectedBox.id, { color: hex, gradient: undefined })}
+                          onClick={() => handleUpdateTemplateBox(selectedBox.id, solidFillUpdates(selectedBox, { color: hex }))}
                           className={`w-7 h-7 rounded-full border transition-all ${
                             selectedBox.color.toUpperCase() === hex.toUpperCase()
                               ? 'border-white scale-110 shadow-md ring-2 ring-[#E5B224]'
@@ -2613,7 +2675,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                             : '#E5B224'
                         }
                         onChange={(e) =>
-                          handleUpdateTemplateBox(selectedBox.id, { color: e.target.value, gradient: undefined })
+                          handleUpdateTemplateBox(selectedBox.id, solidFillUpdates(selectedBox, { color: e.target.value }))
                         }
                         className="w-7 h-7 rounded-full bg-transparent border-0 cursor-pointer shrink-0"
                         title="Choose custom color"
@@ -3527,22 +3589,31 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         ref={batchUploadRef}
         type="file"
         multiple
-        accept="image/png, image/jpeg, image/jpg"
-        onChange={(e) => handleUploadFiles(e.target.files)}
+        accept="image/*,.jpg,.jpeg,.png,.webp"
+        onChange={(e) => {
+          handleUploadFiles(e.target.files);
+          e.target.value = '';
+        }}
         className="hidden"
       />
       <input
         ref={singleUploadRef}
         type="file"
-        accept="image/png, image/jpeg, image/jpg"
-        onChange={(e) => handleUploadFiles(e.target.files)}
+        accept="image/*,.jpg,.jpeg,.png,.webp"
+        onChange={(e) => {
+          handleUploadFiles(e.target.files);
+          e.target.value = '';
+        }}
         className="hidden"
       />
       <input
         ref={overlayUploadRef}
         type="file"
-        accept="image/png, image/jpeg, image/jpg, image/webp"
-        onChange={(e) => handleInsertImageOverlay(e.target.files)}
+        accept="image/*,.jpg,.jpeg,.png,.webp"
+        onChange={(e) => {
+          handleInsertImageOverlay(e.target.files);
+          e.target.value = '';
+        }}
         className="hidden"
       />
 

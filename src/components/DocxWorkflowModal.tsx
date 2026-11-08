@@ -24,7 +24,7 @@ import {
   downloadDocxSpreadsheet,
 } from '../utils/docxParser';
 import { DocxScanResult, Project, TextBoxTemplate, DesignPage } from '../types';
-import { storeImageFile, saveProject, createDefaultTemplate } from '../utils/db';
+import { storeImageFile, isImageFile, saveProject, createDefaultTemplate } from '../utils/db';
 import * as XLSX from 'xlsx';
 
 interface DocxWorkflowModalProps {
@@ -99,7 +99,7 @@ export const DocxWorkflowModal: React.FC<DocxWorkflowModalProps> = ({
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      if (!file.type.startsWith('image/')) continue;
+      if (!isImageFile(file)) continue;
       try {
         const stored = await storeImageFile(file);
         storedList.push({
