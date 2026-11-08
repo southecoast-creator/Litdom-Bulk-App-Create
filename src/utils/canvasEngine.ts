@@ -7,7 +7,7 @@
  * - Proportional typography scaling from 1000px baseline.
  */
 
-import { TextBoxTemplate, DesignPage, TextRun, TextRunEffect } from '../types';
+import { TextBoxTemplate, DesignPage, TextRun, TextRunEffect, TextGradientSettings } from '../types';
 import { ensureFontLoaded, BUILTIN_GOOGLE_FONTS } from './fontManager';
 
 export interface BuiltinFont {
@@ -154,6 +154,7 @@ export interface LayoutToken {
   fontWeight: string;
   fontStyle: string;
   color: string;
+  gradient?: TextGradientSettings;
   letterSpacing: number;
   underline: boolean;
   strike: boolean;
@@ -242,7 +243,16 @@ function tokenizeRuns(
         }
       }
 
-      tokens.push({
+    // Gradient priority:
+    // 1. If run has its own solid color, that word is solid color (gradient undefined).
+    // 2. If run has its own gradient (enabled !== false), that word uses run.gradient.
+    // 3. If run has no color and no gradient, fall back to box.gradient if enabled.
+    const runHasExplicitColor = run.color !== undefined;
+    const runGradient = run.gradient?.enabled ? run.gradient : undefined;
+    const boxGradient = box.gradient?.enabled ? box.gradient : (box.effects?.gradient?.enabled ? box.effects.gradient : undefined);
+    const tokenGradient = runHasExplicitColor ? undefined : (runGradient || boxGradient);
+
+    tokens.push({
         text: part,
         isWhitespace,
         isNewline,
@@ -252,6 +262,7 @@ function tokenizeRuns(
         fontWeight,
         fontStyle,
         color,
+        gradient: tokenGradient,
         letterSpacing,
         underline,
         strike,
@@ -686,18 +697,19 @@ function drawStyledTokenWithEffects(
     ctx.lineWidth = Math.max(1, Math.round(w * scale));
     ctx.strokeText(token.text, tokenX, baselineY);
     ctx.restore();
-  } else if (effects.gradient?.enabled) {
+  } else if (token.gradient?.enabled || effects.gradient?.enabled) {
     ctx.save();
-    const angleRad = ((effects.gradient.angle ?? 90) * Math.PI) / 180;
+    const gSettings = token.gradient?.enabled ? token.gradient : effects.gradient;
+    const angleRad = (((gSettings?.angle ?? 90)) * Math.PI) / 180;
     const grad = ctx.createLinearGradient(
       tokenX,
       baselineY - token.fontSize,
       tokenX + Math.cos(angleRad) * token.width,
       baselineY + Math.sin(angleRad) * token.fontSize
     );
-    const c1 = effects.gradient.color || token.color || '#D4AF37';
-    const c2 = effects.gradient.color2 || '#FFFFFF';
-    const c3 = effects.gradient.color3;
+    const c1 = gSettings?.color || '#22C55E';
+    const c2 = gSettings?.color2 || '#FACC15';
+    const c3 = gSettings?.color3 || '#3B82F6';
 
     grad.addColorStop(0, c1);
     if (c3) {

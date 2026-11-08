@@ -56,6 +56,14 @@ export interface TextRunEffect {
   dripping?: EffectItemSettings;
 }
 
+export interface TextGradientSettings {
+  enabled?: boolean;
+  color?: string; // Stop 1 (default #22C55E)
+  color2?: string; // Stop 2 (default #FACC15)
+  color3?: string; // Stop 3 (default #3B82F6)
+  angle?: number; // 0 - 360 (default 90)
+}
+
 export interface TextRun {
   text: string;
   bold?: boolean;
@@ -63,6 +71,7 @@ export interface TextRun {
   underline?: boolean;
   strike?: boolean;
   color?: string;
+  gradient?: TextGradientSettings;
   fontFamily?: string;
   fontSize?: number; // stored for a 1000px-wide baseline
   letterSpacing?: number;
@@ -82,6 +91,7 @@ export interface TextBoxTemplate {
   fontStyle: 'normal' | 'italic';
   textAlign: 'left' | 'center' | 'right' | 'justify';
   color: string;
+  gradient?: TextGradientSettings;
   lineHeight?: number;
   letterSpacing?: number;
   textCase?: 'lowercase' | 'uppercase' | 'title' | 'none';

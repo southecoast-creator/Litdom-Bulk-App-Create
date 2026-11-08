@@ -38,8 +38,10 @@ import {
   TextRunEffect,
   EffectItemSettings,
   StoredFontRecord,
+  TextGradientSettings,
 } from '../types';
 import { BUILTIN_GOOGLE_FONTS, loadAllStoredFonts } from '../utils/fontManager';
+import { FontPanel } from './FontPanel';
 
 interface RichTextOverlayProps {
   box: TextBoxTemplate;
@@ -66,6 +68,7 @@ interface WordToken {
   underline?: boolean;
   strike?: boolean;
   color?: string;
+  gradient?: TextGradientSettings;
   fontFamily?: string;
   fontSize?: number;
   letterSpacing?: number;
@@ -125,6 +128,7 @@ export const RichTextOverlay: React.FC<RichTextOverlayProps> = ({
           underline: run.underline,
           strike: run.strike,
           color: run.color,
+          gradient: run.gradient ? JSON.parse(JSON.stringify(run.gradient)) : undefined,
           fontFamily: run.fontFamily,
           fontSize: run.fontSize,
           letterSpacing: run.letterSpacing,

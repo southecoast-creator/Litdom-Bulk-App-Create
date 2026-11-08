@@ -234,6 +234,10 @@ export async function uploadAndRegisterFont(
   // Persist to IndexedDB "fonts" store
   await saveFontRecord(record);
 
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('font-library-updated', { detail: { familyName: realFamilyName } }));
+  }
+
   return record;
 }
 
@@ -328,6 +332,9 @@ export function isFontUsedInProjects(
  */
 export async function removeCustomFont(id: string): Promise<void> {
   await deleteFontRecord(id);
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('font-library-updated'));
+  }
 }
 
 /**
@@ -336,6 +343,9 @@ export async function removeCustomFont(id: string): Promise<void> {
 export async function deleteAllCustomFonts(): Promise<void> {
   await dbDeleteAllFonts();
   loadedFontFamilies.clear();
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('font-library-updated'));
+  }
 }
 
 /**
@@ -358,6 +368,10 @@ export async function renameCustomFont(
   const buffer = await updated.blob.arrayBuffer();
   await registerFontFace(updated.familyName, buffer);
   await saveFontRecord(updated);
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('font-library-updated', { detail: { familyName: updated.familyName } }));
+  }
 }
 
 /**

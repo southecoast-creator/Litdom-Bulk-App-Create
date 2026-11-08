@@ -80,6 +80,7 @@ import { loadAllStoredFonts } from '../utils/fontManager';
 import { SpreadsheetSheet } from './SpreadsheetSheet';
 import { DownloadSheet } from './DownloadSheet';
 import { FontManagerModal } from './FontManagerModal';
+import { FontPanel } from './FontPanel';
 import { RichTextOverlay } from './RichTextOverlay';
 import { SyncLayoutModal } from './SyncLayoutModal';
 import { AddPanelModal } from './AddPanelModal';
@@ -158,6 +159,12 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
   // Toast Notification
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // Mode A Effect Settings Inspector
+  const [inspectedEffect, setInspectedEffect] = useState<
+    'shadow' | 'glow' | 'outline' | 'neon' | 'hollow' | 'highlight'
+  >('shadow');
+  const [activeGradientStop, setActiveGradientStop] = useState<1 | 2 | 3>(1);
 
   // Mobile Bottom Panel Tab
   const [mobilePanelTab, setMobilePanelTab] = useState<'text' | 'style'>('text');
@@ -2347,6 +2354,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
             <div className="flex items-center justify-between mb-3 border-b border-[#262632] pb-2">
               <span className="text-xs font-bold text-[#E5B224] uppercase tracking-wider">
                 {activeSelectedTool === 'styles' && 'Text Styles'}
+                {activeSelectedTool === 'font' && 'Font Family & Library'}
                 {activeSelectedTool === 'size' && 'Font Size'}
                 {activeSelectedTool === 'color' && 'Color & Palette'}
                 {activeSelectedTool === 'effects' && 'Text Effects'}
@@ -2359,6 +2367,19 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {/* Font Panel */}
+            {activeSelectedTool === 'font' && (
+              <div className="space-y-3">
+                <FontPanel
+                  selectedFontFamily={selectedBox.fontFamily}
+                  onSelectFont={(fontName) =>
+                    handleUpdateTemplateBox(selectedBox.id, { fontFamily: fontName })
+                  }
+                  compact
+                />
+              </div>
+            )}
 
             {/* Styles Panel */}
             {activeSelectedTool === 'styles' && (
@@ -2494,168 +2515,625 @@ export const Workspace: React.FC<WorkspaceProps> = ({
               </div>
             )}
 
-            {/* Color Panel */}
+            {/* Color Panel (Solid | Gradient Fill) */}
             {activeSelectedTool === 'color' && (
               <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-white/70">Hex Code</span>
-                  <div className="flex items-center gap-1 bg-[#17171C] border border-[#2D2D38] px-2 py-1 rounded-lg">
-                    <span className="text-xs text-[#E5B224] font-mono">#</span>
-                    <input
-                      type="text"
-                      maxLength={7}
-                      value={selectedBox.color.replace(/^#/, '')}
-                      onChange={(e) => {
-                        const val = e.target.value.trim();
-                        if (/^[0-9A-Fa-f]{0,6}$/.test(val)) {
-                          handleUpdateTemplateBox(selectedBox.id, { color: '#' + val });
-                        }
-                      }}
-                      className="w-16 bg-transparent text-xs font-mono text-white focus:outline-none uppercase"
-                    />
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-between gap-1.5 flex-wrap">
-                  {[
-                    '#E5B224',
-                    '#FFF8E7',
-                    '#F4D58D',
-                    '#FFFFFF',
-                    '#0B0B0F',
-                    '#EF4444',
-                    '#3B82F6',
-                    '#10B981',
-                    '#8B5CF6',
-                    '#F59E0B',
-                  ].map((hex) => (
-                    <button
-                      key={hex}
-                      onClick={() => handleUpdateTemplateBox(selectedBox.id, { color: hex })}
-                      className={`w-7 h-7 rounded-full border transition-all ${
-                        selectedBox.color.toUpperCase() === hex.toUpperCase()
-                          ? 'border-white scale-110 shadow-md ring-2 ring-[#E5B224]'
-                          : 'border-white/20 hover:scale-105'
-                      }`}
-                      style={{ backgroundColor: hex }}
-                      title={hex}
-                    />
-                  ))}
-                  <input
-                    type="color"
-                    value={
-                      selectedBox.color.startsWith('#') && selectedBox.color.length === 7
-                        ? selectedBox.color
-                        : '#E5B224'
-                    }
-                    onChange={(e) =>
-                      handleUpdateTemplateBox(selectedBox.id, { color: e.target.value })
-                    }
-                    className="w-7 h-7 rounded-full bg-transparent border-0 cursor-pointer shrink-0"
-                    title="Choose custom color"
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Effects Panel */}
-            {activeSelectedTool === 'effects' && (
-              <div className="space-y-3">
-                <div className="grid grid-cols-4 gap-1.5">
-                  {(['none', 'shadow', 'glow', 'outline', 'neon', 'hollow', 'highlight', 'gradient'] as const).map(
-                    (effect) => (
-                      <button
-                        key={effect}
-                        onClick={() => {
-                          const currentEffects = selectedBox.effects || {};
-                          if (effect === 'none') {
-                            handleUpdateTemplateBox(selectedBox.id, { effects: undefined });
-                          } else {
-                            handleUpdateTemplateBox(selectedBox.id, {
-                              effects: {
-                                ...currentEffects,
-                                shadow: effect === 'shadow' ? { enabled: true, blur: 8, color: '#000000', offsetX: 2, offsetY: 2 } : currentEffects.shadow,
-                                glow: effect === 'glow' ? { enabled: true, blur: 16, color: '#E5B224', opacity: 90, intensity: 75 } : currentEffects.glow,
-                                outline: effect === 'outline' ? { enabled: true, width: 2, color: '#000000' } : currentEffects.outline,
-                                neon: effect === 'neon' ? { enabled: true, intensity: 1.5, color: '#00FFA3', blur: 16 } : currentEffects.neon,
-                                hollow: effect === 'hollow' ? { enabled: true, strokeWidth: 1.5, strokeColor: selectedBox.color, color: selectedBox.color } : currentEffects.hollow,
-                                highlight: effect === 'highlight' ? { enabled: true, color: '#FFE600', opacity: 60 } : currentEffects.highlight,
-                                gradient: effect === 'gradient' ? { enabled: true, color: '#E5B224', color2: '#F43F5E', color3: '#3B82F6', angle: 90 } : currentEffects.gradient,
-                              },
-                            });
-                          }
-                        }}
-                        className={`py-1.5 px-2 border text-[11px] font-semibold rounded-lg capitalize text-center transition-all ${
-                          selectedBox.effects && selectedBox.effects[effect]?.enabled
-                            ? 'bg-[#E5B224] text-black border-[#E5B224] font-bold shadow-md'
-                            : 'bg-[#17171C] hover:bg-[#262632] border-[#333342] text-white'
-                        }`}
-                      >
-                        {effect}
-                      </button>
-                    )
-                  )}
+                {/* Mode Switch: Solid Fill vs Gradient Fill */}
+                <div className="flex items-center p-1 bg-[#121217] rounded-xl border border-[#2D2D38]">
                   <button
-                    onClick={() => handleUpdateTemplateBox(selectedBox.id, { effects: undefined })}
-                    className="py-1.5 px-2 bg-red-950/40 hover:bg-red-900/60 border border-red-800 text-[11px] font-semibold rounded-lg text-red-300 text-center"
+                    type="button"
+                    onClick={() => {
+                      handleUpdateTemplateBox(selectedBox.id, { gradient: undefined });
+                    }}
+                    className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all ${
+                      !selectedBox.gradient?.enabled
+                        ? 'bg-[#E5B224] text-black shadow-sm'
+                        : 'text-white/60 hover:text-white'
+                    }`}
                   >
-                    Reset
+                    Solid
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const existing = selectedBox.gradient;
+                      handleUpdateTemplateBox(selectedBox.id, {
+                        gradient: {
+                          enabled: true,
+                          color: existing?.color || '#22C55E',
+                          color2: existing?.color2 || '#FACC15',
+                          color3: existing?.color3 !== undefined ? existing.color3 : '#3B82F6',
+                          angle: existing?.angle ?? 90,
+                        },
+                      });
+                    }}
+                    className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all ${
+                      selectedBox.gradient?.enabled
+                        ? 'bg-[#E5B224] text-black shadow-sm'
+                        : 'text-white/60 hover:text-white'
+                    }`}
+                  >
+                    Gradient
                   </button>
                 </div>
 
-                {/* 3-Colour Gradient Customizer in Mode A */}
-                {selectedBox.effects?.gradient?.enabled && (
-                  <div className="pt-2 border-t border-[#333342]/60 space-y-2">
-                    <div className="flex items-center justify-between text-xs font-semibold text-[#E5B224]">
-                      <span>3-Colour Gradient</span>
-                      <span className="text-[10px] text-white/50">{selectedBox.effects.gradient.angle ?? 90}°</span>
+                {/* SOLID FILL CONTROLS */}
+                {!selectedBox.gradient?.enabled ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-white/70">Hex Code</span>
+                      <div className="flex items-center gap-1 bg-[#17171C] border border-[#2D2D38] px-2 py-1 rounded-lg">
+                        <span className="text-xs text-[#E5B224] font-mono">#</span>
+                        <input
+                          type="text"
+                          maxLength={7}
+                          value={selectedBox.color.replace(/^#/, '')}
+                          onChange={(e) => {
+                            const val = e.target.value.trim();
+                            if (/^[0-9A-Fa-f]{0,6}$/.test(val)) {
+                              handleUpdateTemplateBox(selectedBox.id, { color: '#' + val, gradient: undefined });
+                            }
+                          }}
+                          className="w-16 bg-transparent text-xs font-mono text-white focus:outline-none uppercase"
+                        />
+                      </div>
                     </div>
-                    <div className="grid grid-cols-3 gap-2">
-                      <div className="flex flex-col items-center gap-1 bg-[#17171C] p-1.5 rounded-lg border border-[#333342]">
-                        <span className="text-[10px] text-white/60">Colour 1</span>
-                        <input
-                          type="color"
-                          value={selectedBox.effects.gradient.color || '#E5B224'}
-                          onChange={(e) => {
-                            const grad = { ...selectedBox.effects?.gradient, color: e.target.value, enabled: true };
-                            handleUpdateTemplateBox(selectedBox.id, {
-                              effects: { ...selectedBox.effects, gradient: grad },
-                            });
-                          }}
-                          className="w-7 h-7 rounded-full bg-transparent border-0 cursor-pointer"
+
+                    <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                      {[
+                        '#E5B224',
+                        '#FFF8E7',
+                        '#F4D58D',
+                        '#FFFFFF',
+                        '#0B0B0F',
+                        '#EF4444',
+                        '#3B82F6',
+                        '#10B981',
+                        '#8B5CF6',
+                        '#F59E0B',
+                      ].map((hex) => (
+                        <button
+                          key={hex}
+                          type="button"
+                          onClick={() => handleUpdateTemplateBox(selectedBox.id, { color: hex, gradient: undefined })}
+                          className={`w-7 h-7 rounded-full border transition-all ${
+                            selectedBox.color.toUpperCase() === hex.toUpperCase()
+                              ? 'border-white scale-110 shadow-md ring-2 ring-[#E5B224]'
+                              : 'border-white/20 hover:scale-105'
+                          }`}
+                          style={{ backgroundColor: hex }}
+                          title={hex}
                         />
-                      </div>
-                      <div className="flex flex-col items-center gap-1 bg-[#17171C] p-1.5 rounded-lg border border-[#333342]">
-                        <span className="text-[10px] text-white/60">Colour 2</span>
-                        <input
-                          type="color"
-                          value={selectedBox.effects.gradient.color2 || '#F43F5E'}
-                          onChange={(e) => {
-                            const grad = { ...selectedBox.effects?.gradient, color2: e.target.value, enabled: true };
-                            handleUpdateTemplateBox(selectedBox.id, {
-                              effects: { ...selectedBox.effects, gradient: grad },
-                            });
-                          }}
-                          className="w-7 h-7 rounded-full bg-transparent border-0 cursor-pointer"
-                        />
-                      </div>
-                      <div className="flex flex-col items-center gap-1 bg-[#17171C] p-1.5 rounded-lg border border-[#333342]">
-                        <span className="text-[10px] text-white/60">Colour 3</span>
-                        <input
-                          type="color"
-                          value={selectedBox.effects.gradient.color3 || '#3B82F6'}
-                          onChange={(e) => {
-                            const grad = { ...selectedBox.effects?.gradient, color3: e.target.value, enabled: true };
-                            handleUpdateTemplateBox(selectedBox.id, {
-                              effects: { ...selectedBox.effects, gradient: grad },
-                            });
-                          }}
-                          className="w-7 h-7 rounded-full bg-transparent border-0 cursor-pointer"
-                        />
-                      </div>
+                      ))}
+                      <input
+                        type="color"
+                        value={
+                          selectedBox.color.startsWith('#') && selectedBox.color.length === 7
+                            ? selectedBox.color
+                            : '#E5B224'
+                        }
+                        onChange={(e) =>
+                          handleUpdateTemplateBox(selectedBox.id, { color: e.target.value, gradient: undefined })
+                        }
+                        className="w-7 h-7 rounded-full bg-transparent border-0 cursor-pointer shrink-0"
+                        title="Choose custom color"
+                      />
                     </div>
                   </div>
+                ) : (
+                  /* GRADIENT FILL CONTROLS */
+                  <div className="space-y-3">
+                    {/* Live Preview Bar */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-[11px] text-white/70">
+                        <span>Preview</span>
+                        <span className="font-mono text-[#E5B224]">{selectedBox.gradient?.angle ?? 90}°</span>
+                      </div>
+                      <div
+                        className="w-full h-7 rounded-xl border border-white/20 shadow-inner"
+                        style={{
+                          background: selectedBox.gradient?.color3
+                            ? `linear-gradient(${selectedBox.gradient.angle ?? 90}deg, ${selectedBox.gradient.color || '#22C55E'}, ${selectedBox.gradient.color2 || '#FACC15'}, ${selectedBox.gradient.color3})`
+                            : `linear-gradient(${selectedBox.gradient?.angle ?? 90}deg, ${selectedBox.gradient?.color || '#22C55E'}, ${selectedBox.gradient?.color2 || '#FACC15'})`,
+                        }}
+                      />
+                    </div>
+
+                    {/* Angle Slider */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-xs text-white/70">
+                        <span>Angle</span>
+                        <span className="font-mono text-xs text-[#E5B224]">{selectedBox.gradient?.angle ?? 90}°</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={360}
+                        value={selectedBox.gradient?.angle ?? 90}
+                        onChange={(e) => {
+                          const angle = parseInt(e.target.value, 10);
+                          handleUpdateTemplateBox(selectedBox.id, {
+                            gradient: {
+                              ...selectedBox.gradient,
+                              enabled: true,
+                              angle,
+                            },
+                          });
+                        }}
+                        className="w-full accent-[#E5B224] cursor-pointer"
+                      />
+                    </div>
+
+                    {/* Stops Count Toggle & Stop Buttons */}
+                    <div className="flex items-center justify-between pt-1 border-t border-[#262632]">
+                      <span className="text-xs text-white/70 font-semibold">Stops</span>
+                      <div className="flex items-center gap-1 bg-[#17171C] p-0.5 rounded-lg border border-[#2D2D38]">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            handleUpdateTemplateBox(selectedBox.id, {
+                              gradient: {
+                                ...selectedBox.gradient,
+                                enabled: true,
+                                color3: undefined,
+                              },
+                            });
+                            if (activeGradientStop === 3) setActiveGradientStop(2);
+                          }}
+                          className={`px-2 py-0.5 text-[11px] font-bold rounded ${
+                            !selectedBox.gradient?.color3
+                              ? 'bg-[#E5B224] text-black shadow-sm'
+                              : 'text-white/60 hover:text-white'
+                          }`}
+                        >
+                          2 Stops
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            handleUpdateTemplateBox(selectedBox.id, {
+                              gradient: {
+                                ...selectedBox.gradient,
+                                enabled: true,
+                                color3: selectedBox.gradient?.color3 || '#3B82F6',
+                              },
+                            });
+                          }}
+                          className={`px-2 py-0.5 text-[11px] font-bold rounded ${
+                            selectedBox.gradient?.color3
+                              ? 'bg-[#E5B224] text-black shadow-sm'
+                              : 'text-white/60 hover:text-white'
+                          }`}
+                        >
+                          3 Stops
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Stop Selector Tabs */}
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {[1, 2, ...(selectedBox.gradient?.color3 !== undefined ? [3] : [])].map((stopNum) => {
+                        const sColor =
+                          stopNum === 1
+                            ? selectedBox.gradient?.color || '#22C55E'
+                            : stopNum === 2
+                            ? selectedBox.gradient?.color2 || '#FACC15'
+                            : selectedBox.gradient?.color3 || '#3B82F6';
+                        const isActive = activeGradientStop === stopNum;
+
+                        return (
+                          <button
+                            key={stopNum}
+                            type="button"
+                            onClick={() => setActiveGradientStop(stopNum as 1 | 2 | 3)}
+                            className={`p-1.5 rounded-xl border flex items-center justify-center gap-2 transition-all ${
+                              isActive
+                                ? 'bg-[#2A2A38] border-[#E5B224] ring-1 ring-[#E5B224]'
+                                : 'bg-[#17171C] border-[#333342] hover:border-white/40'
+                            }`}
+                          >
+                            <span
+                              className="w-4 h-4 rounded-full border border-white/40 shrink-0"
+                              style={{ backgroundColor: sColor }}
+                            />
+                            <span className="text-[11px] font-bold text-white">Stop {stopNum}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Stop Color Editor (Color Picker + Hex Code) */}
+                    {(() => {
+                      const curColor =
+                        activeGradientStop === 1
+                          ? selectedBox.gradient?.color || '#22C55E'
+                          : activeGradientStop === 2
+                          ? selectedBox.gradient?.color2 || '#FACC15'
+                          : selectedBox.gradient?.color3 || '#3B82F6';
+
+                      const updateStopColor = (newHex: string) => {
+                        const grad = { ...selectedBox.gradient, enabled: true };
+                        if (activeGradientStop === 1) grad.color = newHex;
+                        else if (activeGradientStop === 2) grad.color2 = newHex;
+                        else grad.color3 = newHex;
+                        handleUpdateTemplateBox(selectedBox.id, { gradient: grad });
+                      };
+
+                      return (
+                        <div className="space-y-2 p-2 bg-[#17171C] rounded-xl border border-[#2D2D38]">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs text-white/80 font-semibold">Stop {activeGradientStop} Colour</span>
+                            <div className="flex items-center gap-1 bg-[#121217] border border-[#333342] px-2 py-0.5 rounded-lg">
+                              <span className="text-xs text-[#E5B224] font-mono">#</span>
+                              <input
+                                type="text"
+                                maxLength={7}
+                                value={curColor.replace(/^#/, '')}
+                                onChange={(e) => {
+                                  const val = e.target.value.trim();
+                                  if (/^[0-9A-Fa-f]{0,6}$/.test(val)) {
+                                    updateStopColor('#' + val);
+                                  }
+                                }}
+                                className="w-16 bg-transparent text-xs font-mono text-white focus:outline-none uppercase"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                            {[
+                              '#22C55E',
+                              '#FACC15',
+                              '#3B82F6',
+                              '#EF4444',
+                              '#EC4899',
+                              '#8B5CF6',
+                              '#10B981',
+                              '#F97316',
+                              '#FFFFFF',
+                              '#000000',
+                            ].map((hex) => (
+                              <button
+                                key={hex}
+                                type="button"
+                                onClick={() => updateStopColor(hex)}
+                                className={`w-6 h-6 rounded-full border transition-all ${
+                                  curColor.toUpperCase() === hex.toUpperCase()
+                                    ? 'border-white scale-110 shadow-md ring-2 ring-[#E5B224]'
+                                    : 'border-white/20 hover:scale-105'
+                                }`}
+                                style={{ backgroundColor: hex }}
+                                title={hex}
+                              />
+                            ))}
+                            <input
+                              type="color"
+                              value={curColor.startsWith('#') && curColor.length === 7 ? curColor : '#22C55E'}
+                              onChange={(e) => updateStopColor(e.target.value)}
+                              className="w-6 h-6 rounded-full bg-transparent border-0 cursor-pointer shrink-0"
+                              title="Pick custom stop colour"
+                            />
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
                 )}
+              </div>
+            )}
+
+            {/* Effects Panel (shadow, glow, outline, neon, hollow, highlight) */}
+            {activeSelectedTool === 'effects' && (
+              <div className="space-y-3">
+                {/* Effect Toggle Buttons */}
+                <div className="grid grid-cols-3 gap-1.5">
+                  {(['shadow', 'glow', 'outline', 'neon', 'hollow', 'highlight'] as const).map(
+                    (effect) => {
+                      const isEnabled = !!selectedBox.effects?.[effect]?.enabled;
+                      const isInspected = inspectedEffect === effect;
+
+                      return (
+                        <button
+                          key={effect}
+                          type="button"
+                          onClick={() => {
+                            const currentEffects = { ...(selectedBox.effects || {}) };
+                            if (isEnabled && isInspected) {
+                              // Tapping active effect toggles it off
+                              currentEffects[effect] = {
+                                ...currentEffects[effect],
+                                enabled: false,
+                              };
+                              handleUpdateTemplateBox(selectedBox.id, { effects: currentEffects });
+                            } else if (isEnabled && !isInspected) {
+                              // Inspect this effect
+                              setInspectedEffect(effect);
+                            } else {
+                              // Enable and inspect
+                              setInspectedEffect(effect);
+                              currentEffects[effect] = {
+                                ...currentEffects[effect],
+                                enabled: true,
+                                ...(effect === 'shadow'
+                                  ? { blur: 8, color: '#000000', offsetX: 3, offsetY: 3, opacity: 80 }
+                                  : {}),
+                                ...(effect === 'glow'
+                                  ? { blur: 16, color: '#E5B224', intensity: 75, opacity: 90 }
+                                  : {}),
+                                ...(effect === 'outline'
+                                  ? { width: 2, color: '#000000', opacity: 100 }
+                                  : {}),
+                                ...(effect === 'neon'
+                                  ? { intensity: 1.5, color: '#00FFA3', blur: 16, opacity: 100 }
+                                  : {}),
+                                ...(effect === 'hollow'
+                                  ? { width: 2, strokeWidth: 2, color: selectedBox.color || '#FFF8E7', opacity: 100 }
+                                  : {}),
+                                ...(effect === 'highlight'
+                                  ? { color: '#FFE600', opacity: 60 }
+                                  : {}),
+                              };
+                              handleUpdateTemplateBox(selectedBox.id, { effects: currentEffects });
+                            }
+                          }}
+                          className={`py-1.5 px-2 border text-[11px] font-semibold rounded-lg capitalize text-center transition-all flex items-center justify-between ${
+                            isEnabled
+                              ? isInspected
+                                ? 'bg-[#E5B224] text-black border-[#E5B224] font-bold shadow-md ring-1 ring-white'
+                                : 'bg-[#E5B224]/80 text-black border-[#E5B224] font-bold'
+                              : isInspected
+                              ? 'bg-[#262632] border-[#E5B224] text-white'
+                              : 'bg-[#17171C] hover:bg-[#262632] border-[#333342] text-white/80'
+                          }`}
+                        >
+                          <span>{effect}</span>
+                          {isEnabled && <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />}
+                        </button>
+                      );
+                    }
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between pt-1">
+                  <span className="text-[11px] text-white/60 font-medium">Multiple effects can be combined</span>
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateTemplateBox(selectedBox.id, { effects: undefined })}
+                    className="py-1 px-2.5 bg-red-950/40 hover:bg-red-900/60 border border-red-800 text-[11px] font-semibold rounded-lg text-red-300 text-center"
+                  >
+                    Reset all effects
+                  </button>
+                </div>
+
+                {/* Settings Panel for Inspected Effect */}
+                {(() => {
+                  const effKey = inspectedEffect;
+                  const effSettings = selectedBox.effects?.[effKey] || {};
+                  const isEnabled = !!effSettings.enabled;
+
+                  const updateEff = (changes: Record<string, any>) => {
+                    const currentEffects = { ...(selectedBox.effects || {}) };
+                    currentEffects[effKey] = {
+                      ...currentEffects[effKey],
+                      enabled: true,
+                      ...changes,
+                    };
+                    handleUpdateTemplateBox(selectedBox.id, { effects: currentEffects });
+                  };
+
+                  return (
+                    <div className="p-3 bg-[#17171C] rounded-xl border border-[#2D2D38] space-y-3 pt-2.5">
+                      <div className="flex items-center justify-between border-b border-[#262632] pb-1.5">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold capitalize text-[#E5B224]">
+                            {effKey} Controls
+                          </span>
+                          <span
+                            className={`text-[10px] px-1.5 py-0.2 rounded font-bold uppercase ${
+                              isEnabled ? 'bg-emerald-500/20 text-emerald-400' : 'bg-white/10 text-white/40'
+                            }`}
+                          >
+                            {isEnabled ? 'Active' : 'Off'}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const currentEffects = { ...(selectedBox.effects || {}) };
+                            currentEffects[effKey] = {
+                              ...currentEffects[effKey],
+                              enabled: !isEnabled,
+                            };
+                            handleUpdateTemplateBox(selectedBox.id, { effects: currentEffects });
+                          }}
+                          className={`text-[11px] px-2 py-0.5 rounded font-bold transition-colors ${
+                            isEnabled
+                              ? 'bg-red-500/20 text-red-300 hover:bg-red-500/30'
+                              : 'bg-[#E5B224] text-black hover:bg-[#F4D58D]'
+                          }`}
+                        >
+                          {isEnabled ? 'Turn Off' : 'Turn On'}
+                        </button>
+                      </div>
+
+                      {/* Controls: Colour */}
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between text-xs text-white/70">
+                          <span>Colour</span>
+                          <div className="flex items-center gap-1 bg-[#121217] border border-[#333342] px-2 py-0.5 rounded-lg">
+                            <span className="text-xs text-[#E5B224] font-mono">#</span>
+                            <input
+                              type="text"
+                              maxLength={7}
+                              value={(effSettings.color || (effKey === 'neon' ? '#00FFA3' : effKey === 'highlight' ? '#FFE600' : '#000000')).replace(/^#/, '')}
+                              onChange={(e) => {
+                                const val = e.target.value.trim();
+                                if (/^[0-9A-Fa-f]{0,6}$/.test(val)) {
+                                  updateEff({ color: '#' + val });
+                                }
+                              }}
+                              className="w-16 bg-transparent text-xs font-mono text-white focus:outline-none uppercase"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-1 flex-wrap">
+                          {[
+                            '#000000',
+                            '#FFFFFF',
+                            '#E5B224',
+                            '#00FFA3',
+                            '#3B82F6',
+                            '#EF4444',
+                            '#FFE600',
+                            '#EC4899',
+                          ].map((hex) => (
+                            <button
+                              key={hex}
+                              type="button"
+                              onClick={() => updateEff({ color: hex })}
+                              className={`w-5 h-5 rounded-full border transition-all ${
+                                (effSettings.color || '').toUpperCase() === hex.toUpperCase()
+                                  ? 'border-white scale-110 shadow-md ring-2 ring-[#E5B224]'
+                                  : 'border-white/20 hover:scale-105'
+                              }`}
+                              style={{ backgroundColor: hex }}
+                              title={hex}
+                            />
+                          ))}
+                          <input
+                            type="color"
+                            value={
+                              effSettings.color && effSettings.color.startsWith('#') && effSettings.color.length === 7
+                                ? effSettings.color
+                                : effKey === 'neon' ? '#00FFA3' : '#000000'
+                            }
+                            onChange={(e) => updateEff({ color: e.target.value })}
+                            className="w-5 h-5 rounded-full bg-transparent border-0 cursor-pointer shrink-0"
+                            title="Choose custom colour"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Controls: Intensity (for glow, neon) */}
+                      {(effKey === 'glow' || effKey === 'neon') && (
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between text-xs text-white/70">
+                            <span>Intensity</span>
+                            <span className="font-mono text-[#E5B224] text-xs">
+                              {effKey === 'neon'
+                                ? (effSettings.intensity ?? 1.5)
+                                : `${effSettings.intensity ?? 75}%`}
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={effKey === 'neon' ? 0.5 : 0}
+                            max={effKey === 'neon' ? 3.0 : 100}
+                            step={effKey === 'neon' ? 0.1 : 1}
+                            value={effKey === 'neon' ? (effSettings.intensity ?? 1.5) : (effSettings.intensity ?? 75)}
+                            onChange={(e) =>
+                              updateEff({
+                                intensity: effKey === 'neon' ? parseFloat(e.target.value) : parseInt(e.target.value, 10),
+                              })
+                            }
+                            className="w-full accent-[#E5B224] cursor-pointer"
+                          />
+                        </div>
+                      )}
+
+                      {/* Controls: Blur (for shadow, glow, neon) */}
+                      {(effKey === 'shadow' || effKey === 'glow' || effKey === 'neon') && (
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between text-xs text-white/70">
+                            <span>Blur</span>
+                            <span className="font-mono text-[#E5B224] text-xs">{effSettings.blur ?? (effKey === 'shadow' ? 8 : 16)}px</span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0}
+                            max={40}
+                            value={effSettings.blur ?? (effKey === 'shadow' ? 8 : 16)}
+                            onChange={(e) => updateEff({ blur: parseInt(e.target.value, 10) })}
+                            className="w-full accent-[#E5B224] cursor-pointer"
+                          />
+                        </div>
+                      )}
+
+                      {/* Controls: Opacity */}
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-xs text-white/70">
+                          <span>Opacity</span>
+                          <span className="font-mono text-[#E5B224] text-xs">{effSettings.opacity ?? 100}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={10}
+                          max={100}
+                          value={effSettings.opacity ?? 100}
+                          onChange={(e) => updateEff({ opacity: parseInt(e.target.value, 10) })}
+                          className="w-full accent-[#E5B224] cursor-pointer"
+                        />
+                      </div>
+
+                      {/* Controls: Offset X & Offset Y (for shadow) */}
+                      {effKey === 'shadow' && (
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="space-y-1">
+                            <div className="flex items-center justify-between text-xs text-white/70">
+                              <span>Offset X</span>
+                              <span className="font-mono text-[#E5B224] text-xs">{effSettings.offsetX ?? 3}px</span>
+                            </div>
+                            <input
+                              type="range"
+                              min={-25}
+                              max={25}
+                              value={effSettings.offsetX ?? 3}
+                              onChange={(e) => updateEff({ offsetX: parseInt(e.target.value, 10) })}
+                              className="w-full accent-[#E5B224] cursor-pointer"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <div className="flex items-center justify-between text-xs text-white/70">
+                              <span>Offset Y</span>
+                              <span className="font-mono text-[#E5B224] text-xs">{effSettings.offsetY ?? 3}px</span>
+                            </div>
+                            <input
+                              type="range"
+                              min={-25}
+                              max={25}
+                              value={effSettings.offsetY ?? 3}
+                              onChange={(e) => updateEff({ offsetY: parseInt(e.target.value, 10) })}
+                              className="w-full accent-[#E5B224] cursor-pointer"
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Controls: Width (for outline, hollow) */}
+                      {(effKey === 'outline' || effKey === 'hollow') && (
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between text-xs text-white/70">
+                            <span>Width</span>
+                            <span className="font-mono text-[#E5B224] text-xs">{effSettings.width ?? 2}px</span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0.5}
+                            max={effKey === 'hollow' ? 6 : 10}
+                            step={0.5}
+                            value={effSettings.width ?? 2}
+                            onChange={(e) => {
+                              const w = parseFloat(e.target.value);
+                              updateEff({ width: w, strokeWidth: w });
+                            }}
+                            className="w-full accent-[#E5B224] cursor-pointer"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
@@ -2962,12 +3440,18 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
               {/* [🪶 Font] */}
               <button
-                onClick={() => setIsFontManagerOpen(true)}
-                className="flex flex-col items-center justify-center px-2 py-1 rounded-xl text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24] transition-all min-w-[46px] min-h-[46px]"
+                onClick={() =>
+                  setActiveSelectedTool(activeSelectedTool === 'font' ? null : 'font')
+                }
+                className={`flex flex-col items-center justify-center px-2 py-1 rounded-xl transition-all min-w-[48px] min-h-[46px] ${
+                  activeSelectedTool === 'font'
+                    ? 'bg-[#E5B224] text-black'
+                    : 'text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24]'
+                }`}
                 title="Select Font"
               >
-                <Type className="w-4 h-4 text-[#E5B224]" />
-                <span className="text-[10px] font-bold mt-1">Font</span>
+                <Type className="w-4 h-4" />
+                <span className="text-[10px] font-bold mt-1 whitespace-nowrap">Font</span>
               </button>
 
               {/* [a Font size] */}
