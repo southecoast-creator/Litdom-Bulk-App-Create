@@ -405,7 +405,7 @@ export const TextEditor: React.FC<TextEditorProps> = ({
         className="bg-[#0B0B0F] border-t-2 border-[#D4AF37]/60 shadow-2xl text-white px-3 pt-2 pb-3"
       >
         <div className="flex items-center justify-between mb-2">
-          <span className="text-[11px] text-[#E5B224] font-semibold">{status}</span>
+          <span className="text-[11px] text-[#E5B224] font-semibold truncate max-w-[45%]">Editing: <b>{box.fieldLabel}</b> · {status}</span>
           <div className="flex items-center gap-2">
             <button onPointerDown={keep} onClick={selectAll} className="px-2.5 py-1 rounded-full text-[11px] font-bold border border-[#D4AF37]/60 text-[#E5B224] active:scale-95">
               Select all

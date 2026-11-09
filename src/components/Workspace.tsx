@@ -714,6 +714,31 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     triggerAutoSave(updatedProj);
   };
 
+  // Layers: change which element is in front (later in the list = in front)
+  const handleReorderBox = (mode: 'back' | 'backward' | 'forward' | 'front') => {
+    if (!activePage || !selectedBoxId) return;
+    const list = [...activeBoxes];
+    const i = list.findIndex((b) => b.id === selectedBoxId);
+    if (i < 0) return;
+    let j = i;
+    if (mode === 'back') j = 0;
+    else if (mode === 'backward') j = Math.max(0, i - 1);
+    else if (mode === 'forward') j = Math.min(list.length - 1, i + 1);
+    else j = list.length - 1;
+    if (j === i) return;
+    recordHistory(project, true);
+    const [item] = list.splice(i, 1);
+    list.splice(j, 0, item);
+    const updatedProj: Project = {
+      ...project,
+      pages: project.pages.map((p, idx) => (idx === activePageIndex ? { ...p, textBoxes: list } : p)),
+      updatedAt: Date.now(),
+    };
+    onUpdateProject(updatedProj);
+    triggerAutoSave(updatedProj);
+    showToast(mode === 'back' ? 'Sent to back' : mode === 'front' ? 'Brought to front' : mode === 'backward' ? 'Moved back one layer' : 'Moved forward one layer');
+  };
+
   // Copy this design's layout to all designs
   const handleCopyLayoutToAllDesigns = () => {
     if (!activePage) return;
@@ -1066,10 +1091,18 @@ export const Workspace: React.FC<WorkspaceProps> = ({
               fillColor: match.fillColor,
               strokeColor: match.strokeColor,
               strokeWidth: match.strokeWidth,
+              gradient: match.gradient ? JSON.parse(JSON.stringify(match.gradient)) : undefined,
+              padding: match.padding,
             };
           }
           return b;
         });
+        // Fields that don't exist on the target design yet are added there
+        for (const sb of sourceBoxes) {
+          if (!updated.some((b) => b.fieldLabel === sb.fieldLabel)) {
+            updated.push(JSON.parse(JSON.stringify(sb)));
+          }
+        }
         return { ...p, textBoxes: updated };
       }
       return p;
@@ -1999,6 +2032,27 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                   }}
                   className="workspace-canvas crisp-render cursor-move max-w-full h-auto rounded-xl shadow-lg"
                 />
+
+                {/* Warning when the selected text runs past the bottom of the page */}
+                {(() => {
+                  const c = canvasRef.current;
+                  if (!c || !selectedBox || !activePage || activeHandle) return null;
+                  if (selectedBox.elementType && selectedBox.elementType !== 'text') return null;
+                  try {
+                    const ctx = c.getContext('2d');
+                    if (!ctx) return null;
+                    const r = c.getBoundingClientRect();
+                    const hPct = (computeTextBoxLayout(ctx, selectedBox, activePage, r.width, r.height).computedHeightPx / r.height) * 100;
+                    if (selectedBox.y + hPct <= 100.5) return null;
+                    return (
+                      <div className="absolute z-30 pointer-events-none left-1/2 -translate-x-1/2 px-3 py-1 rounded-full bg-amber-400 text-black text-[11px] font-bold shadow-lg" style={{ top: c.offsetTop + c.offsetHeight - 30 }}>
+                        Text runs past the bottom of the page
+                      </div>
+                    );
+                  } catch {
+                    return null;
+                  }
+                })()}
 
                 {/* Red dashed alignment guides (only while moving) */}
                 {activeHandle === 'move' && canvasRef.current && (guides.v.length > 0 || guides.h.length > 0) && (
@@ -3483,6 +3537,27 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                       {align === 'justify' && <AlignJustify className="w-4 h-4" />}
                     </button>
                   ))}
+                </div>
+
+                {/* Layers: which element sits in front */}
+                <div className="pt-2 border-t border-[#333342]/60">
+                  <div className="text-[11px] font-bold text-[#E5B224] mb-2">Layers (front / back)</div>
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {([
+                      ['back', 'To back'],
+                      ['backward', 'Back 1'],
+                      ['forward', 'Forward 1'],
+                      ['front', 'To front'],
+                    ] as const).map(([m, label]) => (
+                      <button
+                        key={m}
+                        onClick={() => handleReorderBox(m)}
+                        className="py-2 bg-[#17171C] border border-[#333342] rounded-lg text-[10px] text-white/80 font-semibold active:bg-[#D4AF37] active:text-black"
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 {/* Position pad: tap or hold to nudge */}
