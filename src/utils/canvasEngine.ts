@@ -9,6 +9,7 @@
 
 import { TextBoxTemplate, DesignPage, TextRun, TextRunEffect, TextGradientSettings } from '../types';
 import { ensureFontLoaded, BUILTIN_GOOGLE_FONTS } from './fontManager';
+import { getImageRecord } from './db';
 
 export interface BuiltinFont {
   name: string;
@@ -87,6 +88,98 @@ export async function getOrLoadDecodedImage(
 
 export function clearDecodedImageCache(): void {
   decodedImageCache.clear();
+  overlayImageCache.clear();
+}
+
+/**
+ * Overlay (sticker / logo / photo) images live in their own small cache so they are
+ * never evicted by the page-background LRU above, and so the renderer can load them
+ * itself. Previously nothing ever loaded them, so overlays showed only an empty
+ * gold control box and never the picture.
+ *
+ * Preview renders use the ~1200px preview blob (fast); exports use the original (sharp).
+ */
+const OVERLAY_CACHE_LIMIT = 12;
+const overlayImageCache = new Map<string, HTMLImageElement>();
+const overlayInflight = new Map<string, Promise<HTMLImageElement | null>>();
+
+function overlayKey(imageId: string, original: boolean): string {
+  return `${imageId}:${original ? 'o' : 'p'}`;
+}
+
+function getCachedOverlay(imageId: string, original: boolean): HTMLImageElement | undefined {
+  const key = overlayKey(imageId, original);
+  const hit = overlayImageCache.get(key);
+  if (hit) {
+    // refresh recency
+    overlayImageCache.delete(key);
+    overlayImageCache.set(key, hit);
+    return hit;
+  }
+  // An original-quality copy can stand in for a preview request
+  if (!original) {
+    const orig = overlayImageCache.get(overlayKey(imageId, true));
+    if (orig) return orig;
+  }
+  return undefined;
+}
+
+async function loadOverlayImage(imageId: string, original: boolean): Promise<HTMLImageElement | null> {
+  const cached = getCachedOverlay(imageId, original);
+  if (cached) return cached;
+
+  const key = overlayKey(imageId, original);
+  const pending = overlayInflight.get(key);
+  if (pending) return pending;
+
+  const job = (async () => {
+    try {
+      const record = await getImageRecord(imageId);
+      if (!record) return null;
+      const blob = original
+        ? record.originalBlob
+        : record.previewBlob || record.originalBlob;
+      if (!blob) return null;
+
+      const url = URL.createObjectURL(blob);
+      try {
+        const img = new Image();
+        img.decoding = 'async';
+        img.src = url;
+        await new Promise<void>((resolve, reject) => {
+          img.onload = () => resolve();
+          img.onerror = () => reject(new Error('Failed to decode overlay image'));
+        });
+
+        if (overlayImageCache.size >= OVERLAY_CACHE_LIMIT) {
+          const oldest = overlayImageCache.keys().next().value;
+          if (oldest) overlayImageCache.delete(oldest);
+        }
+        overlayImageCache.set(key, img);
+        return img;
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    } catch (err) {
+      console.warn('Overlay image could not be loaded:', imageId, err);
+      return null;
+    } finally {
+      overlayInflight.delete(key);
+    }
+  })();
+
+  overlayInflight.set(key, job);
+  return job;
+}
+
+/** Make sure every image overlay used by these boxes is decoded before drawing. */
+async function ensureOverlayImages(boxes: TextBoxTemplate[], original: boolean): Promise<void> {
+  const ids = new Set<string>();
+  for (const b of boxes) {
+    if (b.elementType === 'image_overlay' && b.imageOverlayId) ids.add(b.imageOverlayId);
+  }
+  if (ids.size === 0) return;
+  await Promise.all(Array.from(ids).map((id) => loadOverlayImage(id, original)));
 }
 
 /**
@@ -1097,6 +1190,9 @@ export async function renderDesignToCanvas(
   // Ensure fonts are explicitly loaded
   await preloadTemplateFonts(boxesToRender, page.richValues);
 
+  // Ensure any image overlays (stickers, logos, photos) are decoded before drawing
+  await ensureOverlayImages(boxesToRender, !!options.isExport);
+
   // Load decoded background image strictly under page.imageId
   const img = await getOrLoadDecodedImage(page.imageId, imageSrcOrBlob);
 
@@ -1184,8 +1280,8 @@ export async function renderDesignToCanvas(
       drawTable(ctx, box, boxX, boxY, boxW, computedHeightPx, scale);
     } else if (box.elementType === 'image_overlay') {
       if (box.imageOverlayId) {
-        const overlayImg = decodedImageCache.get(box.imageOverlayId);
-        if (overlayImg && overlayImg.complete) {
+        const overlayImg = getCachedOverlay(box.imageOverlayId, !!options.isExport);
+        if (overlayImg && overlayImg.complete && overlayImg.naturalWidth > 0) {
           ctx.drawImage(overlayImg, boxX, boxY, boxW, computedHeightPx);
         } else {
           ctx.strokeStyle = '#D4AF37';

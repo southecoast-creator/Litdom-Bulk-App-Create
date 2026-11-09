@@ -1100,15 +1100,30 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
     try {
       const stored = await storeImageFile(file);
+
+      // Start at the picture's real proportions (no squashing). Box width/height are
+      // percentages of the page, so convert using the page's own aspect ratio.
+      const pageW = activePage.width || 1080;
+      const pageH = activePage.height || 1920;
+      const imgAspect = stored.height / Math.max(1, stored.width); // h / w
+      let ovW = 40; // % of page width
+      let ovH = ovW * (pageW / pageH) * imgAspect; // % of page height
+      if (ovH > 55) {
+        ovH = 55;
+        ovW = ovH / ((pageW / pageH) * imgAspect);
+      }
+      const ovX = Math.max(0, (100 - ovW) / 2);
+      const ovY = Math.max(0, Math.min(100 - ovH, (100 - ovH) / 2));
+
       const newBox: TextBoxTemplate = {
         id: `img_overlay_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         fieldLabel: file.name.replace(/\.[^/.]+$/, ''),
         elementType: 'image_overlay',
         imageOverlayId: stored.imageId,
-        x: 30,
-        y: 30,
-        width: 40,
-        height: 40,
+        x: Math.round(ovX * 10) / 10,
+        y: Math.round(ovY * 10) / 10,
+        width: Math.round(ovW * 10) / 10,
+        height: Math.round(ovH * 10) / 10,
         fontFamily: 'Plus Jakarta Sans',
         fontSize: 24,
         fontWeight: '500',
