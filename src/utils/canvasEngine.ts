@@ -259,6 +259,10 @@ export interface LayoutLine {
   width: number;
   height: number;
   maxFontSize: number;
+  /** Left offset (px) for wrapped lines of a bullet / numbered item (hanging indent) */
+  indent?: number;
+  /** Line belongs to a bullet / numbered item: always left-aligned */
+  isList?: boolean;
 }
 
 export interface ComputedLayoutResult {
@@ -446,6 +450,12 @@ export function computeTextBoxLayout(
   let currentLineWidth = 0;
   let currentMaxFontSize = Math.max(6, Math.round(box.fontSize * scale));
 
+  // Bullet / numbered item state (hanging indent)
+  let atParaStart = true;
+  let isListPara = false;
+  let paraIndent = 0;
+  let lineIndent = 0;
+
   const finishLine = () => {
     // Trim trailing whitespace tokens from line width calculation
     let trimmedWidth = currentLineWidth;
@@ -461,6 +471,8 @@ export function computeTextBoxLayout(
       width: Math.round(Math.max(0, trimmedWidth)),
       height: lineHeightPx,
       maxFontSize: Math.round(currentMaxFontSize),
+      indent: lineIndent,
+      isList: isListPara,
     });
 
     currentTokens = [];
@@ -473,6 +485,10 @@ export function computeTextBoxLayout(
 
     if (t.isNewline) {
       finishLine();
+      atParaStart = true;
+      isListPara = false;
+      paraIndent = 0;
+      lineIndent = 0;
       continue;
     }
 
@@ -481,12 +497,13 @@ export function computeTextBoxLayout(
     }
 
     // Check line wrapping
-    if (currentTokens.length > 0 && currentLineWidth + t.width > innerW) {
+    if (currentTokens.length > 0 && currentLineWidth + t.width > innerW - lineIndent) {
       if (t.isWhitespace) {
         // Drop leading space on wrap
         continue;
       }
       finishLine();
+      lineIndent = isListPara ? paraIndent : 0;
     }
 
     // Don't add leading whitespace on a new line
@@ -494,8 +511,20 @@ export function computeTextBoxLayout(
       continue;
     }
 
+    if (atParaStart && !t.isWhitespace) {
+      atParaStart = false;
+      const next = tokens[i + 1];
+      isListPara =
+        (t.text === '\u2022' || /^\d{1,3}[.)]$/.test(t.text)) && !!next && next.isWhitespace && !next.isNewline;
+    }
+
     currentTokens.push(t);
     currentLineWidth += t.width;
+
+    // Width of "marker + space" becomes the hanging indent for wrapped lines
+    if (isListPara && paraIndent === 0 && currentTokens.length === 2 && t.isWhitespace) {
+      paraIndent = currentLineWidth;
+    }
   }
 
   if (currentTokens.length > 0 || lines.length === 0) {
@@ -1309,8 +1338,10 @@ export async function renderDesignToCanvas(
       for (const line of lines) {
         const baselineY = Math.round(currentY + line.maxFontSize);
 
-        let lineStartX = Math.round(boxX + scaledPadding);
-        if (box.textAlign === 'center') {
+        let lineStartX = Math.round(boxX + scaledPadding + (line.indent || 0));
+        if (line.isList) {
+          // bullet / numbered items stay left-aligned so the markers line up
+        } else if (box.textAlign === 'center') {
           lineStartX = Math.round(boxX + (boxW - line.width) / 2);
         } else if (box.textAlign === 'right') {
           lineStartX = Math.round(boxX + boxW - scaledPadding - line.width);
