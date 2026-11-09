@@ -1665,8 +1665,8 @@ export const Workspace: React.FC<WorkspaceProps> = ({
           }
         };
         const myH = pctH(me);
-        const thX = (6 / rect.width) * 100;
-        const thY = (6 / rect.height) * 100;
+        const thX = (8 / rect.width) * 100;
+        const thY = (8 / rect.height) * 100;
         const xt: number[] = [0, 50, 100];
         const yt: number[] = [0, 50, 100];
         activeBoxes.forEach((b) => {
@@ -2007,10 +2007,16 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                     width: canvasRef.current.offsetWidth, height: canvasRef.current.offsetHeight,
                   }}>
                     {guides.v.map((x) => (
-                      <div key={`v${x}`} style={{ position: 'absolute', left: `${x}%`, top: 0, bottom: 0, borderLeft: '2.5px dashed #FF2D55', filter: 'drop-shadow(0 0 3px #FF2D55) drop-shadow(0 0 1px #fff)' }} />
+                      <React.Fragment key={`v${x}`}>
+                        <div style={{ position: 'absolute', left: `${x}%`, top: 0, bottom: 0, width: 5, marginLeft: -2.5, background: 'rgba(255,255,255,0.85)' }} />
+                        <div style={{ position: 'absolute', left: `${x}%`, top: 0, bottom: 0, marginLeft: -1.25, borderLeft: '2.5px dashed #FF1744' }} />
+                      </React.Fragment>
                     ))}
                     {guides.h.map((y) => (
-                      <div key={`h${y}`} style={{ position: 'absolute', top: `${y}%`, left: 0, right: 0, borderTop: '2.5px dashed #FF2D55', filter: 'drop-shadow(0 0 3px #FF2D55) drop-shadow(0 0 1px #fff)' }} />
+                      <React.Fragment key={`h${y}`}>
+                        <div style={{ position: 'absolute', top: `${y}%`, left: 0, right: 0, height: 5, marginTop: -2.5, background: 'rgba(255,255,255,0.85)' }} />
+                        <div style={{ position: 'absolute', top: `${y}%`, left: 0, right: 0, marginTop: -1.25, borderTop: '2.5px dashed #FF1744' }} />
+                      </React.Fragment>
                     ))}
                   </div>
                 )}

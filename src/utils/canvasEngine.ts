@@ -321,6 +321,10 @@ function tokenizeRuns(
     // Apply font to context to measure accurately
     if (ctx) {
       ctx.font = `${fontStyle} ${fontWeight} ${fontSize}px "${fontFamily}", sans-serif`;
+      try {
+        (ctx as any).textRendering = 'geometricPrecision';
+        (ctx as any).fontKerning = 'normal';
+      } catch {}
     }
 
     // Split text into words, spaces, and explicit newlines
@@ -468,7 +472,7 @@ export function computeTextBoxLayout(
     const lineHeightPx = Math.round(currentMaxFontSize * (box.lineHeight || 1.3));
     lines.push({
       tokens: [...currentTokens],
-      width: Math.round(Math.max(0, trimmedWidth)),
+      width: Math.max(0, trimmedWidth),
       height: lineHeightPx,
       maxFontSize: Math.round(currentMaxFontSize),
       indent: lineIndent,
@@ -611,6 +615,11 @@ function drawStyledTokenWithEffects(
 
   ctx.save();
   ctx.font = `${token.fontStyle} ${token.fontWeight} ${token.fontSize}px "${token.fontFamily}", sans-serif`;
+  // Crisp, evenly spaced glyphs (no hinting-driven jitter)
+  try {
+    (ctx as any).textRendering = 'geometricPrecision';
+    (ctx as any).fontKerning = 'normal';
+  } catch {}
   if (token.letterSpacing && typeof (ctx as any).letterSpacing !== 'undefined') {
     (ctx as any).letterSpacing = `${token.letterSpacing}px`;
   }
@@ -1338,25 +1347,25 @@ export async function renderDesignToCanvas(
       for (const line of lines) {
         const baselineY = Math.round(currentY + line.maxFontSize);
 
-        let lineStartX = Math.round(boxX + scaledPadding + (line.indent || 0));
+        let lineStartX = boxX + scaledPadding + (line.indent || 0);
         if (line.isList) {
           // bullet / numbered items stay left-aligned so the markers line up
         } else if (box.textAlign === 'center') {
-          lineStartX = Math.round(boxX + (boxW - line.width) / 2);
+          lineStartX = boxX + (boxW - line.width) / 2;
         } else if (box.textAlign === 'right') {
-          lineStartX = Math.round(boxX + boxW - scaledPadding - line.width);
+          lineStartX = boxX + boxW - scaledPadding - line.width;
         }
 
         let tokenX = lineStartX;
 
         for (const token of line.tokens) {
           if (token.isWhitespace && token.text.trim() === '') {
-            tokenX += Math.round(token.width);
+            tokenX += token.width;
             continue;
           }
 
-          drawStyledTokenWithEffects(ctx, token, Math.round(tokenX), baselineY, scale, box);
-          tokenX += Math.round(token.width);
+          drawStyledTokenWithEffects(ctx, token, tokenX, baselineY, scale, box);
+          tokenX += token.width;
         }
 
         currentY += line.height;
