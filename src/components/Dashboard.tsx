@@ -9,6 +9,7 @@
  * - Storage section with Used (red) and Available (green) indicators
  */
 
+import { applyListMarkers, listKindFromLabel } from '../utils/listFormat';
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Bell,
@@ -269,7 +270,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
         const matchingCol = pendingSheetData.headers.find(
           (h) => h.toLowerCase() === box.fieldLabel.toLowerCase()
         ) || pendingSheetData.headers[0];
-        values[box.fieldLabel] = row[matchingCol] || '';
+        const kind = listKindFromLabel(matchingCol) || listKindFromLabel(box.fieldLabel);
+        values[box.fieldLabel] = kind ? applyListMarkers(row[matchingCol] || '', kind) : row[matchingCol] || '';
       });
 
       pages.push({

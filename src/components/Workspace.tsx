@@ -7,6 +7,8 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
+  List as ListIcon,
+  ListOrdered,
   ArrowLeft,
   Home,
   Menu,
@@ -77,6 +79,8 @@ import {
   predecodeImages,
 } from '../utils/canvasEngine';
 import { populateDesignsFromSpreadsheet } from '../utils/spreadsheetEngine';
+import { toggleListInRange, selectionListKind, runsToText, reconcileRunsWithText, totalLength } from '../utils/richText';
+import type { ListKind } from '../utils/listFormat';
 import { loadAllStoredFonts } from '../utils/fontManager';
 import { SpreadsheetSheet } from './SpreadsheetSheet';
 import { DownloadSheet } from './DownloadSheet';
@@ -142,7 +146,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   const [isSocialShareOpen, setIsSocialShareOpen] = useState(false);
   const [showTopThumbnails, setShowTopThumbnails] = useState(false);
   const [activeSelectedTool, setActiveSelectedTool] = useState<
-    'styles' | 'font' | 'size' | 'color' | 'effects' | 'format' | null
+    'styles' | 'font' | 'size' | 'color' | 'effects' | 'format' | 'position' | null
   >(null);
   const [isUploadMenuOpen, setIsUploadMenuOpen] = useState(false);
   const [isRightPanelOpen, setIsRightPanelOpen] = useState(false);
@@ -202,6 +206,17 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
   // Snap-to-Grid mode for precise alignment
   const [isSnapToGrid, setIsSnapToGrid] = useState(false);
+
+  // Red alignment guides (shown only while dragging a box), in % of the page
+  const [guides, setGuides] = useState<{ v: number[]; h: number[] }>({ v: [], h: [] });
+  const guidesActiveRef = useRef(false);
+
+  // Nudge pad: step size + hold-to-repeat
+  const [nudgeStep, setNudgeStep] = useState<number>(1);
+  const nudgeStepRef = useRef<number>(1);
+  nudgeStepRef.current = nudgeStep;
+  const nudgeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const nudgeDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const selectedBox: TextBoxTemplate | undefined =
     selectedBoxId ? activeBoxes.find((b) => b.id === selectedBoxId) : undefined;
@@ -728,7 +743,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         },
         richValues: {
           ...(p.richValues || {}),
-          [fieldLabel]: [{ text: newValue }],
+          [fieldLabel]: reconcileRunsWithText(p.richValues?.[fieldLabel] || [{ text: p.values[fieldLabel] || '' }], newValue),
         },
       };
     });
@@ -740,6 +755,16 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     };
     onUpdateProject(updatedProj);
     triggerAutoSave(updatedProj);
+  };
+
+  // Bullet / numbered list for the whole text of the selected box
+  const handleToggleBoxList = (kind: ListKind) => {
+    if (!activePage || !selectedBox) return;
+    const label = selectedBox.fieldLabel;
+    const plain = activePage.values[label] !== undefined ? activePage.values[label] : '';
+    const base = activePage.richValues?.[label]?.length ? activePage.richValues[label] : [{ text: plain }];
+    const out = toggleListInRange(base, 0, totalLength(base), kind);
+    handleSaveRichText(out.runs, runsToText(out.runs));
   };
 
   // Save Rich Text Runs from In-Place Editor
@@ -1100,15 +1125,30 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
     try {
       const stored = await storeImageFile(file);
+
+      // Start at the picture's real proportions (no squashing). Box width/height are
+      // percentages of the page, so convert using the page's own aspect ratio.
+      const pageW = activePage.width || 1080;
+      const pageH = activePage.height || 1920;
+      const imgAspect = stored.height / Math.max(1, stored.width); // h / w
+      let ovW = 40; // % of page width
+      let ovH = ovW * (pageW / pageH) * imgAspect; // % of page height
+      if (ovH > 55) {
+        ovH = 55;
+        ovW = ovH / ((pageW / pageH) * imgAspect);
+      }
+      const ovX = Math.max(0, (100 - ovW) / 2);
+      const ovY = Math.max(0, Math.min(100 - ovH, (100 - ovH) / 2));
+
       const newBox: TextBoxTemplate = {
         id: `img_overlay_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         fieldLabel: file.name.replace(/\.[^/.]+$/, ''),
         elementType: 'image_overlay',
         imageOverlayId: stored.imageId,
-        x: 30,
-        y: 30,
-        width: 40,
-        height: 40,
+        x: Math.round(ovX * 10) / 10,
+        y: Math.round(ovY * 10) / 10,
+        width: Math.round(ovW * 10) / 10,
+        height: Math.round(ovH * 10) / 10,
         fontFamily: 'Plus Jakarta Sans',
         fontSize: 24,
         fontWeight: '500',
@@ -1179,13 +1219,63 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     handleUpdateStyle(selectedBox.id, { rotation: nextRot });
   };
 
-  // Nudge Selected Box (BUG-011, BUG-012)
-  const handleNudgeSelectedBox = (dxPercent: number, dyPercent: number) => {
-    if (!selectedBox) return;
-    const newX = Math.max(0, Math.min(100 - selectedBox.width, selectedBox.x + dxPercent));
-    const newY = Math.max(0, Math.min(95, selectedBox.y + dyPercent));
-    handleUpdateCurrentDesignBoxGeometry(selectedBox.id, { x: newX, y: newY, width: selectedBox.width });
+  // Nudge Selected Box. Reads the newest project through a ref so that holding
+  // a button (rapid repeats) always builds on the previous step.
+  const latestProjectRef = useRef(project);
+  latestProjectRef.current = project;
+
+  const nudgeBox = (dx: number, dy: number, absolute?: { x?: number; y?: number }) => {
+    const proj = latestProjectRef.current;
+    const page = proj.pages[activePageIndex];
+    if (!page || !selectedBoxId) return;
+    const boxes = page.textBoxes || proj.template;
+    const box = boxes.find((b) => b.id === selectedBoxId);
+    if (!box) return;
+    let hPct = box.height || 5;
+    try {
+      const c = canvasRef.current;
+      const ctx = c?.getContext('2d');
+      if (c && ctx) {
+        const r = c.getBoundingClientRect();
+        hPct = (computeTextBoxLayout(ctx, box, page, r.width, r.height).computedHeightPx / r.height) * 100;
+      }
+    } catch {}
+    const r1 = (n: number) => Math.round(n * 10) / 10;
+    const nx = absolute?.x !== undefined ? absolute.x : box.x + dx;
+    const ny = absolute?.y !== undefined ? absolute.y : box.y + dy;
+    const newX = r1(Math.max(0, Math.min(Math.max(0, 100 - box.width), nx)));
+    const newY = r1(Math.max(0, Math.min(Math.max(0, 100 - Math.min(hPct, 95)), ny)));
+    if (newX === box.x && newY === box.y) return;
+    recordHistory(proj);
+    const updatedBoxes = boxes.map((b) => (b.id === box.id ? { ...b, x: newX, y: newY } : b));
+    const updated: Project = {
+      ...proj,
+      pages: proj.pages.map((p, i) => (i === activePageIndex ? { ...p, textBoxes: updatedBoxes } : p)),
+      updatedAt: Date.now(),
+    };
+    latestProjectRef.current = updated;
+    onUpdateProject(updated);
+    triggerAutoSave(updated);
   };
+
+  const handleNudgeSelectedBox = (dxPercent: number, dyPercent: number) => nudgeBox(dxPercent, dyPercent);
+
+  const stopNudgeRepeat = () => {
+    if (nudgeDelayRef.current) clearTimeout(nudgeDelayRef.current);
+    if (nudgeTimerRef.current) clearInterval(nudgeTimerRef.current);
+    nudgeDelayRef.current = null;
+    nudgeTimerRef.current = null;
+  };
+
+  const startNudgeRepeat = (ux: number, uy: number) => {
+    stopNudgeRepeat();
+    nudgeBox(ux * nudgeStepRef.current, uy * nudgeStepRef.current);
+    nudgeDelayRef.current = setTimeout(() => {
+      nudgeTimerRef.current = setInterval(() => nudgeBox(ux * nudgeStepRef.current, uy * nudgeStepRef.current), 70);
+    }, 350);
+  };
+
+  useEffect(() => stopNudgeRepeat, []);
 
   // Delete Field
   const handleDeleteField = (boxId: string) => {
@@ -1469,8 +1559,8 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
     switch (activeHandle) {
       case 'move':
-        newX = Math.max(0, Math.min(100 - dragStart.boxW, Math.round(dragStart.boxX + deltaX)));
-        newY = Math.max(0, Math.min(95, Math.round(dragStart.boxY + deltaY)));
+        newX = Math.max(0, Math.min(100 - dragStart.boxW, Math.round((dragStart.boxX + deltaX) * 10) / 10));
+        newY = Math.max(0, Math.min(95, Math.round((dragStart.boxY + deltaY) * 10) / 10));
         break;
 
       case 'e':
@@ -1538,12 +1628,65 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       }
     }
 
+    // Alignment guides + snapping (move only)
+    if (activeHandle === 'move' && activePage) {
+      const ctx = canvasRef.current.getContext('2d');
+      const me = activeBoxes.find((b) => b.id === selectedBoxId);
+      if (ctx && me) {
+        const pctH = (b: TextBoxTemplate) => {
+          try {
+            return (computeTextBoxLayout(ctx, b, activePage, rect.width, rect.height).computedHeightPx / rect.height) * 100;
+          } catch {
+            return b.height || 5;
+          }
+        };
+        const myH = pctH(me);
+        const thX = (6 / rect.width) * 100;
+        const thY = (6 / rect.height) * 100;
+        const xt: number[] = [0, 50, 100];
+        const yt: number[] = [0, 50, 100];
+        activeBoxes.forEach((b) => {
+          if (b.id === selectedBoxId) return;
+          const h = pctH(b);
+          xt.push(b.x, b.x + b.width / 2, b.x + b.width);
+          yt.push(b.y, b.y + h / 2, b.y + h);
+        });
+        const best = (edges: number[], targets: number[], th: number) => {
+          let d = 0;
+          let min = th;
+          for (const e of edges) for (const t of targets) {
+            const diff = t - e;
+            if (Math.abs(diff) < min) { min = Math.abs(diff); d = diff; }
+          }
+          return min < th ? d : 0;
+        };
+        const dx = best([newX, newX + newW / 2, newX + newW], xt, thX);
+        const dy = best([newY, newY + myH / 2, newY + myH], yt, thY);
+        newX = Math.max(0, Math.min(100 - newW, newX + dx));
+        newY = Math.max(0, Math.min(100 - Math.min(myH, 95), newY + dy));
+        const near = (a: number, b: number) => Math.abs(a - b) < 0.15;
+        const v: number[] = [];
+        const hh: number[] = [];
+        for (const e of [newX, newX + newW / 2, newX + newW]) for (const t of xt) if (near(e, t) && !v.some((q) => near(q, t))) v.push(t);
+        for (const e of [newY, newY + myH / 2, newY + myH]) for (const t of yt) if (near(e, t) && !hh.some((q) => near(q, t))) hh.push(t);
+        setGuides((g) => {
+          if (v.length && !g.v.length && !g.h.length) { try { navigator.vibrate?.(8); } catch {} }
+          return { v, h: hh };
+        });
+        guidesActiveRef.current = true;
+      }
+    }
+
     // Update geometry on active design
     handleUpdateCurrentDesignBoxGeometry(selectedBoxId, { x: newX, y: newY, width: newW });
   };
 
   const handleCanvasPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     isPointerGestureRef.current = false;
+    if (guidesActiveRef.current) {
+      guidesActiveRef.current = false;
+      setGuides({ v: [], h: [] });
+    }
     if (activeHandle) {
       setActiveHandle(null);
       setDragStart(null);
@@ -1832,6 +1975,21 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                   }}
                   className="workspace-canvas crisp-render cursor-move max-w-full h-auto rounded-xl shadow-lg"
                 />
+
+                {/* Red dashed alignment guides (only while moving) */}
+                {activeHandle === 'move' && canvasRef.current && (guides.v.length > 0 || guides.h.length > 0) && (
+                  <div className="absolute pointer-events-none z-30" style={{
+                    left: canvasRef.current.offsetLeft, top: canvasRef.current.offsetTop,
+                    width: canvasRef.current.offsetWidth, height: canvasRef.current.offsetHeight,
+                  }}>
+                    {guides.v.map((x) => (
+                      <div key={`v${x}`} style={{ position: 'absolute', left: `${x}%`, top: 0, bottom: 0, borderLeft: '1.5px dashed #FF2D55' }} />
+                    ))}
+                    {guides.h.map((y) => (
+                      <div key={`h${y}`} style={{ position: 'absolute', top: `${y}%`, left: 0, right: 0, borderTop: '1.5px dashed #FF2D55' }} />
+                    ))}
+                  </div>
+                )}
 
                 {/* Floating Quick-Action Toolbar centered directly underneath selected box (BUG-011) */}
                 {selectedBox && !editingRichBoxId && selectedBoxToolbarPos && (
@@ -3202,6 +3360,30 @@ export const Workspace: React.FC<WorkspaceProps> = ({
             {/* Format Panel */}
             {activeSelectedTool === 'format' && (
               <div className="space-y-3">
+                {/* Lists: whole text of this box (use Mode B for selected words) */}
+                {(() => {
+                  const lbl = selectedBox.fieldLabel;
+                  const runsNow = activePage?.richValues?.[lbl]?.length
+                    ? activePage.richValues[lbl]
+                    : [{ text: activePage?.values[lbl] || '' }];
+                  const cur = selectionListKind(runsNow, 0, totalLength(runsNow));
+                  return (
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleToggleBoxList('bullet')}
+                        className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg border text-[12px] font-semibold ${cur === 'bullet' ? 'bg-[#D4AF37] text-black border-[#D4AF37]' : 'bg-[#17171C] text-white/80 border-[#333342]'}`}
+                      >
+                        <ListIcon className="w-4 h-4" /> Bullets
+                      </button>
+                      <button
+                        onClick={() => handleToggleBoxList('number')}
+                        className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg border text-[12px] font-semibold ${cur === 'number' ? 'bg-[#D4AF37] text-black border-[#D4AF37]' : 'bg-[#17171C] text-white/80 border-[#333342]'}`}
+                      >
+                        <ListOrdered className="w-4 h-4" /> Numbers
+                      </button>
+                    </div>
+                  );
+                })()}
                 <div className="flex items-center gap-1.5">
                   <button
                     onClick={() =>
@@ -3258,42 +3440,90 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                   ))}
                 </div>
 
-                {/* 4-Way Nudge Controls (BUG-011, BUG-012) */}
+                {/* Position pad: tap or hold to nudge */}
                 <div className="pt-2 border-t border-[#333342]/60">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-[11px] font-bold text-[#E5B224]">Nudge Position</span>
-                    <span className="text-[10px] text-white/50">1% per tap</span>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[11px] font-bold text-[#E5B224]">Position</span>
+                    <span className="text-[10px] text-white/50 font-mono">
+                      X {selectedBox.x.toFixed(1)}% · Y {selectedBox.y.toFixed(1)}%
+                    </span>
                   </div>
-                  <div className="flex items-center justify-center gap-2">
+                  <div className="flex items-center justify-center gap-1.5 mb-2">
+                    {[0.5, 1, 5].map((st) => (
+                      <button
+                        key={st}
+                        onClick={() => setNudgeStep(st)}
+                        className={`px-3 py-1 rounded-full text-[11px] font-bold border ${nudgeStep === st ? 'bg-[#D4AF37] text-black border-[#D4AF37]' : 'bg-[#17171C] text-white/70 border-[#333342]'}`}
+                      >
+                        {st}%
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex flex-col items-center gap-1.5">
                     <button
-                      onClick={() => handleNudgeSelectedBox(-1, 0)}
-                      className="p-2 bg-[#17171C] hover:bg-[#262632] border border-[#333342] rounded-lg text-white font-bold min-w-[36px] min-h-[36px] flex items-center justify-center"
-                      title="Nudge Left"
+                      onPointerDown={(e) => { e.preventDefault(); startNudgeRepeat(0, -1); }}
+                      onPointerUp={stopNudgeRepeat}
+                      onPointerLeave={stopNudgeRepeat}
+                      onPointerCancel={stopNudgeRepeat}
+                      onContextMenu={(e) => e.preventDefault()}
+                      style={{ touchAction: 'none', WebkitUserSelect: 'none', userSelect: 'none' }}
+                      className="bg-[#17171C] active:bg-[#D4AF37] active:text-black border border-[#333342] rounded-xl text-white font-bold text-lg w-12 h-12 flex items-center justify-center"
+                      title="Move Up"
+                    >
+                      ↑
+                    </button>
+                    <div className="flex items-center gap-1.5">
+                    <button
+                      onPointerDown={(e) => { e.preventDefault(); startNudgeRepeat(-1, 0); }}
+                      onPointerUp={stopNudgeRepeat}
+                      onPointerLeave={stopNudgeRepeat}
+                      onPointerCancel={stopNudgeRepeat}
+                      onContextMenu={(e) => e.preventDefault()}
+                      style={{ touchAction: 'none', WebkitUserSelect: 'none', userSelect: 'none' }}
+                      className="bg-[#17171C] active:bg-[#D4AF37] active:text-black border border-[#333342] rounded-xl text-white font-bold text-lg w-12 h-12 flex items-center justify-center"
+                      title="Move Left"
                     >
                       ←
                     </button>
-                    <div className="flex flex-col gap-1">
-                      <button
-                        onClick={() => handleNudgeSelectedBox(0, -1)}
-                        className="p-2 bg-[#17171C] hover:bg-[#262632] border border-[#333342] rounded-lg text-white font-bold min-w-[36px] min-h-[36px] flex items-center justify-center"
-                        title="Nudge Up"
-                      >
-                        ↑
-                      </button>
-                      <button
-                        onClick={() => handleNudgeSelectedBox(0, 1)}
-                        className="p-2 bg-[#17171C] hover:bg-[#262632] border border-[#333342] rounded-lg text-white font-bold min-w-[36px] min-h-[36px] flex items-center justify-center"
-                        title="Nudge Down"
-                      >
-                        ↓
-                      </button>
-                    </div>
+                      <div className="w-12 h-12 flex items-center justify-center text-white/30 text-lg">✥</div>
                     <button
-                      onClick={() => handleNudgeSelectedBox(1, 0)}
-                      className="p-2 bg-[#17171C] hover:bg-[#262632] border border-[#333342] rounded-lg text-white font-bold min-w-[36px] min-h-[36px] flex items-center justify-center"
-                      title="Nudge Right"
+                      onPointerDown={(e) => { e.preventDefault(); startNudgeRepeat(1, 0); }}
+                      onPointerUp={stopNudgeRepeat}
+                      onPointerLeave={stopNudgeRepeat}
+                      onPointerCancel={stopNudgeRepeat}
+                      onContextMenu={(e) => e.preventDefault()}
+                      style={{ touchAction: 'none', WebkitUserSelect: 'none', userSelect: 'none' }}
+                      className="bg-[#17171C] active:bg-[#D4AF37] active:text-black border border-[#333342] rounded-xl text-white font-bold text-lg w-12 h-12 flex items-center justify-center"
+                      title="Move Right"
                     >
                       →
+                    </button>
+                    </div>
+                    <button
+                      onPointerDown={(e) => { e.preventDefault(); startNudgeRepeat(0, 1); }}
+                      onPointerUp={stopNudgeRepeat}
+                      onPointerLeave={stopNudgeRepeat}
+                      onPointerCancel={stopNudgeRepeat}
+                      onContextMenu={(e) => e.preventDefault()}
+                      style={{ touchAction: 'none', WebkitUserSelect: 'none', userSelect: 'none' }}
+                      className="bg-[#17171C] active:bg-[#D4AF37] active:text-black border border-[#333342] rounded-xl text-white font-bold text-lg w-12 h-12 flex items-center justify-center"
+                      title="Move Down"
+                    >
+                      ↓
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-center gap-2 mt-2">
+                    <button
+                      onClick={() => nudgeBox(0, 0, { x: (100 - selectedBox.width) / 2 })}
+                      className="px-3 py-1.5 bg-[#17171C] border border-[#333342] rounded-lg text-[11px] text-white/80 font-semibold"
+                    >
+                      Centre ↔
+                    </button>
+                    <button
+                      onClick={() => nudgeBox(0, 0, { y: 50 - (selectedBox.height || 10) / 2 })}
+                      className="px-3 py-1.5 bg-[#17171C] border border-[#333342] rounded-lg text-[11px] text-white/80 font-semibold"
+                    >
+                      Centre ↕
                     </button>
                   </div>
                 </div>
