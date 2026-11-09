@@ -90,6 +90,43 @@ function parseStylesXml(xmlStr: string): Record<string, string> {
 }
 
 /**
+ * Parses word/numbering.xml -> "numId:ilvl" -> number format (bullet, decimal, lowerLetter ...).
+ * Word's real bullet / numbered lists usually carry the generic "List Paragraph" style and
+ * only reveal their kind through numbering.xml.
+ */
+function parseNumberingXml(xmlStr: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  try {
+    const doc = new DOMParser().parseFromString(xmlStr, 'application/xml');
+    const abstractFmt: Record<string, Record<string, string>> = {};
+    const abstracts = doc.getElementsByTagName('w:abstractNum');
+    for (let i = 0; i < abstracts.length; i++) {
+      const a = abstracts[i];
+      const id = a.getAttribute('w:abstractNumId') || '';
+      const lvls = a.getElementsByTagName('w:lvl');
+      abstractFmt[id] = {};
+      for (let l = 0; l < lvls.length; l++) {
+        const ilvl = lvls[l].getAttribute('w:ilvl') || '0';
+        const fmt = lvls[l].getElementsByTagName('w:numFmt')[0]?.getAttribute('w:val') || '';
+        abstractFmt[id][ilvl] = fmt;
+      }
+    }
+    const nums = doc.getElementsByTagName('w:num');
+    for (let i = 0; i < nums.length; i++) {
+      const numId = nums[i].getAttribute('w:numId') || '';
+      const absId = nums[i].getElementsByTagName('w:abstractNumId')[0]?.getAttribute('w:val') || '';
+      const levels = abstractFmt[absId] || {};
+      for (const [ilvl, fmt] of Object.entries(levels)) result[`${numId}:${ilvl}`] = fmt;
+    }
+  } catch (err) {
+    console.warn('Failed to parse numbering.xml:', err);
+  }
+  return result;
+}
+
+const PLAIN_PARAGRAPH_CATEGORIES = new Set(['List Paragraph', 'Normal Text', 'Body Text', 'Plain Text']);
+
+/**
  * Main DOCX File Parser:
  * Deterministic OpenXML structure inspection extracting paragraph styles and pages.
  */
@@ -108,6 +145,11 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
     const stylesXml = await stylesXmlEntry.async('string');
     styleMap = parseStylesXml(stylesXml);
   }
+
+  const numberingEntry = loadedZip.file('word/numbering.xml');
+  const numberingMap: Record<string, string> = numberingEntry
+    ? parseNumberingXml(await numberingEntry.async('string'))
+    : {};
 
   const documentXml = await documentXmlEntry.async('string');
   const parser = new DOMParser();
@@ -141,7 +183,19 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
     const pStyle = pPr?.getElementsByTagName('w:pStyle')[0];
     const styleId = pStyle?.getAttribute('w:val') || 'Normal';
     const styleName = styleMap[styleId] || styleId;
-    const category = normalizeStyleName(styleId, styleName);
+    let category = normalizeStyleName(styleId, styleName);
+
+    // Real Word bullet / numbered lists (w:numPr) -> List Bullet / List Number
+    const numPr = pPr?.getElementsByTagName('w:numPr')[0];
+    if (numPr && PLAIN_PARAGRAPH_CATEGORIES.has(String(category))) {
+      const numId = numPr.getElementsByTagName('w:numId')[0]?.getAttribute('w:val') || '';
+      const ilvl = numPr.getElementsByTagName('w:ilvl')[0]?.getAttribute('w:val') || '0';
+      if (numId && numId !== '0') {
+        const fmt = numberingMap[`${numId}:${ilvl}`] ?? numberingMap[`${numId}:0`];
+        if (fmt === 'bullet') category = 'List Bullet';
+        else if (fmt && fmt !== 'none') category = 'List Number';
+      }
+    }
 
     // Extract text runs
     const runs = p.getElementsByTagName('w:r');

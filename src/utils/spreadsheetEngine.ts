@@ -5,6 +5,7 @@
  * and reconciliation.
  */
 
+import { applyListMarkers, listKindFromLabel } from './listFormat';
 import * as XLSX from 'xlsx';
 import { TextBoxTemplate, DesignPage, TextRun } from '../types';
 
@@ -331,7 +332,9 @@ export function populateDesignsFromSpreadsheet(
 
       for (const [fieldLabel, colName] of Object.entries(mappings)) {
         if (colName && row[colName] !== undefined) {
-          const rawCell = row[colName];
+          // "List Bullet" / "List Number" columns or fields get their markers automatically
+          const listKind = listKindFromLabel(colName) || listKindFromLabel(fieldLabel);
+          const rawCell = listKind ? applyListMarkers(row[colName] || '', listKind) : row[colName];
           const { plainText, runs: parsedRuns } = parseMarkdownRuns(rawCell);
           updatedValues[fieldLabel] = plainText;
 
