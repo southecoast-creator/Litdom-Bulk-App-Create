@@ -159,7 +159,10 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
       } else {
         const fmt = getFormatInternal();
         const qual = getQualityNumeric();
-        const customDim = { width: customWidth, height: customHeight };
+        // Only force a size when the person changed it; otherwise every page keeps its own native size
+        const sizeChanged =
+          !!activePage && (customWidth !== activePage.width || customHeight !== activePage.height);
+        const customDim = sizeChanged ? { width: customWidth, height: customHeight } : undefined;
 
         if (pagesToExport.length === 1) {
           // Single Image download
