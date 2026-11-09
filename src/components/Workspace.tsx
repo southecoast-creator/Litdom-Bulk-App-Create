@@ -87,6 +87,7 @@ import { DownloadSheet } from './DownloadSheet';
 import { FontManagerModal } from './FontManagerModal';
 import { FontPanel } from './FontPanel';
 import { RichTextOverlay } from './RichTextOverlay';
+import { TextEditor } from './TextEditor';
 import { SyncLayoutModal } from './SyncLayoutModal';
 import { AddPanelModal } from './AddPanelModal';
 import { ShapePanelModal, ShapeType } from './ShapePanelModal';
@@ -133,6 +134,11 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
   // Rich Text In-Place Editor state
   const [editingRichBoxId, setEditingRichBoxId] = useState<string | null>(null);
+  // false = quick Canva-style editor, true = full fonts & effects panel
+  const [richStylesMode, setRichStylesMode] = useState(false);
+  useEffect(() => {
+    if (!editingRichBoxId) setRichStylesMode(false);
+  }, [editingRichBoxId]);
   const lastTapRef = useRef<{ time: number; boxId: string | null }>({ time: 0, boxId: null });
 
   // Bottom Sheets & Modals
@@ -2068,7 +2074,22 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                 )}
 
                 {/* Double-tap in-place rich text editor overlay */}
-                {editingLayout && (
+                {editingLayout && !richStylesMode && (
+                  <TextEditor
+                    key={editingLayout.box.id}
+                    box={editingLayout.box}
+                    page={activePage}
+                    scale={editingLayout.scale}
+                    boxX={editingLayout.boxX}
+                    boxY={editingLayout.boxY}
+                    boxW={editingLayout.boxW}
+                    boxH={editingLayout.boxH}
+                    onSave={handleSaveRichText}
+                    onMoreStyles={() => setRichStylesMode(true)}
+                    onClose={() => setEditingRichBoxId(null)}
+                  />
+                )}
+                {editingLayout && richStylesMode && (
                   <RichTextOverlay
                     box={editingLayout.box}
                     page={activePage}
