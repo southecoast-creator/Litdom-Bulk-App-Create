@@ -65,6 +65,7 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
   const [customWidth, setCustomWidth] = useState<number>(activePage?.width || 1080);
   const [customHeight, setCustomHeight] = useState<number>(activePage?.height || 1920);
   const [isSizeEditOpen, setIsSizeEditOpen] = useState(false);
+  const [sharp2x, setSharp2x] = useState(false);
 
   // PDF Settings popup (Page 9)
   const [isPdfSettingsOpen, setIsPdfSettingsOpen] = useState(false);
@@ -162,7 +163,11 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
         // Only force a size when the person changed it; otherwise every page keeps its own native size
         const sizeChanged =
           !!activePage && (customWidth !== activePage.width || customHeight !== activePage.height);
-        const customDim = sizeChanged ? { width: customWidth, height: customHeight } : undefined;
+        const customDim = sizeChanged
+          ? { width: customWidth, height: customHeight }
+          : sharp2x
+          ? { scale: 2 }
+          : undefined;
 
         if (pagesToExport.length === 1) {
           // Single Image download
@@ -240,6 +245,16 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
             <ChevronDown className="w-5 h-5 text-white absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
           </div>
         </div>
+
+        {fileType !== '.pdf' && (
+          <button
+            onClick={() => setSharp2x(!sharp2x)}
+            className={`w-full flex items-center justify-between text-xs font-bold rounded-xl px-3 py-2 border-2 border-black ${sharp2x ? 'bg-black text-[#F4D58D]' : 'bg-transparent text-black'}`}
+          >
+            <span>Extra sharp (2&times; size)</span>
+            <span>{sharp2x ? 'ON' : 'OFF'}</span>
+          </button>
+        )}
 
         {/* 2. Size or Setting Row */}
         {fileType !== '.pdf' ? (

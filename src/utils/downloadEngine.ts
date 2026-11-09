@@ -10,6 +10,13 @@ import { Project, DesignPage, PdfExportSettings } from '../types';
 import { renderDesignToCanvas, preloadTemplateFonts } from './canvasEngine';
 import { getOriginalImageBlob } from './db';
 
+/** Either an exact size, or a multiplier of every page's own size. */
+export interface ExportDimensions {
+  width?: number;
+  height?: number;
+  scale?: number;
+}
+
 export interface ExportProgress {
   current: number;
   total: number;
@@ -73,7 +80,7 @@ export async function exportSingleDesign(
   pageIndex: number,
   format: ExportFormat = 'png',
   quality = 0.92,
-  customDimensions?: { width: number; height: number }
+  customDimensions?: ExportDimensions
 ): Promise<Blob> {
   const page = project.pages[pageIndex];
   if (!page) throw new Error('Design page not found.');
@@ -87,8 +94,15 @@ export async function exportSingleDesign(
   if (!imageBlob) throw new Error(`Could not load background image for ${page.name}`);
 
   const canvas = document.createElement('canvas');
-  const targetW = customDimensions?.width || page.width || 1000;
-  const targetH = customDimensions?.height || page.height || 1000;
+  let targetW = customDimensions?.width || page.width || 1000;
+  let targetH = customDimensions?.height || page.height || 1000;
+  if (!customDimensions?.width && customDimensions?.scale && customDimensions.scale > 1) {
+    // Sharper export: multiply the page's own size, but stay within what a phone can render
+    const maxPixels = 36_000_000;
+    const k = Math.min(customDimensions.scale, Math.sqrt(maxPixels / (targetW * targetH)));
+    targetW = Math.round(targetW * Math.max(1, k));
+    targetH = Math.round(targetH * Math.max(1, k));
+  }
   canvas.width = targetW;
   canvas.height = targetH;
 
@@ -125,7 +139,7 @@ export async function exportDesignsToFiles(
   pageIndexes: number[],
   format: ExportFormat = 'png',
   quality = 0.92,
-  customDimensions?: { width: number; height: number },
+  customDimensions?: ExportDimensions,
   onProgress?: (progress: ExportProgress) => void
 ): Promise<RenderedDesignItem[]> {
   const results: RenderedDesignItem[] = [];
@@ -175,7 +189,7 @@ export async function exportAllDesignsZip(
   project: Project,
   format: ExportFormat = 'png',
   quality = 0.92,
-  customDimensions?: { width: number; height: number },
+  customDimensions?: ExportDimensions,
   onProgress?: (progress: ExportProgress) => void
 ): Promise<Blob> {
   const total = project.pages.length;
