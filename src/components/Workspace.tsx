@@ -7,6 +7,8 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
+  List as ListIcon,
+  ListOrdered,
   ArrowLeft,
   Home,
   Menu,
@@ -77,6 +79,8 @@ import {
   predecodeImages,
 } from '../utils/canvasEngine';
 import { populateDesignsFromSpreadsheet } from '../utils/spreadsheetEngine';
+import { toggleListInRange, selectionListKind, runsToText, reconcileRunsWithText, totalLength } from '../utils/richText';
+import type { ListKind } from '../utils/listFormat';
 import { loadAllStoredFonts } from '../utils/fontManager';
 import { SpreadsheetSheet } from './SpreadsheetSheet';
 import { DownloadSheet } from './DownloadSheet';
@@ -739,7 +743,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         },
         richValues: {
           ...(p.richValues || {}),
-          [fieldLabel]: [{ text: newValue }],
+          [fieldLabel]: reconcileRunsWithText(p.richValues?.[fieldLabel] || [{ text: p.values[fieldLabel] || '' }], newValue),
         },
       };
     });
@@ -751,6 +755,16 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     };
     onUpdateProject(updatedProj);
     triggerAutoSave(updatedProj);
+  };
+
+  // Bullet / numbered list for the whole text of the selected box
+  const handleToggleBoxList = (kind: ListKind) => {
+    if (!activePage || !selectedBox) return;
+    const label = selectedBox.fieldLabel;
+    const plain = activePage.values[label] !== undefined ? activePage.values[label] : '';
+    const base = activePage.richValues?.[label]?.length ? activePage.richValues[label] : [{ text: plain }];
+    const out = toggleListInRange(base, 0, totalLength(base), kind);
+    handleSaveRichText(out.runs, runsToText(out.runs));
   };
 
   // Save Rich Text Runs from In-Place Editor
@@ -3346,6 +3360,30 @@ export const Workspace: React.FC<WorkspaceProps> = ({
             {/* Format Panel */}
             {activeSelectedTool === 'format' && (
               <div className="space-y-3">
+                {/* Lists: whole text of this box (use Mode B for selected words) */}
+                {(() => {
+                  const lbl = selectedBox.fieldLabel;
+                  const runsNow = activePage?.richValues?.[lbl]?.length
+                    ? activePage.richValues[lbl]
+                    : [{ text: activePage?.values[lbl] || '' }];
+                  const cur = selectionListKind(runsNow, 0, totalLength(runsNow));
+                  return (
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleToggleBoxList('bullet')}
+                        className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg border text-[12px] font-semibold ${cur === 'bullet' ? 'bg-[#D4AF37] text-black border-[#D4AF37]' : 'bg-[#17171C] text-white/80 border-[#333342]'}`}
+                      >
+                        <ListIcon className="w-4 h-4" /> Bullets
+                      </button>
+                      <button
+                        onClick={() => handleToggleBoxList('number')}
+                        className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg border text-[12px] font-semibold ${cur === 'number' ? 'bg-[#D4AF37] text-black border-[#D4AF37]' : 'bg-[#17171C] text-white/80 border-[#333342]'}`}
+                      >
+                        <ListOrdered className="w-4 h-4" /> Numbers
+                      </button>
+                    </div>
+                  );
+                })()}
                 <div className="flex items-center gap-1.5">
                   <button
                     onClick={() =>
