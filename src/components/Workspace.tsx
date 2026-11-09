@@ -87,6 +87,7 @@ import { DownloadSheet } from './DownloadSheet';
 import { FontManagerModal } from './FontManagerModal';
 import { FontPanel } from './FontPanel';
 import { RichTextOverlay } from './RichTextOverlay';
+import { TextEditor } from './TextEditor';
 import { SyncLayoutModal } from './SyncLayoutModal';
 import { AddPanelModal } from './AddPanelModal';
 import { ShapePanelModal, ShapeType } from './ShapePanelModal';
@@ -133,6 +134,11 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
   // Rich Text In-Place Editor state
   const [editingRichBoxId, setEditingRichBoxId] = useState<string | null>(null);
+  // false = quick Canva-style editor, true = full fonts & effects panel
+  const [richStylesMode, setRichStylesMode] = useState(false);
+  useEffect(() => {
+    if (!editingRichBoxId) setRichStylesMode(false);
+  }, [editingRichBoxId]);
   const lastTapRef = useRef<{ time: number; boxId: string | null }>({ time: 0, boxId: null });
 
   // Bottom Sheets & Modals
@@ -1224,6 +1230,17 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   const latestProjectRef = useRef(project);
   latestProjectRef.current = project;
 
+  // While a box is being dragged/resized, stop the page from scrolling under the finger.
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const block = (ev: TouchEvent) => {
+      if (isPointerGestureRef.current && ev.cancelable) ev.preventDefault();
+    };
+    el.addEventListener('touchmove', block, { passive: false });
+    return () => el.removeEventListener('touchmove', block);
+  }, [currentImageData, activePageIndex]);
+
   const nudgeBox = (dx: number, dy: number, absolute?: { x?: number; y?: number }) => {
     const proj = latestProjectRef.current;
     const page = proj.pages[activePageIndex];
@@ -1983,10 +2000,10 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                     width: canvasRef.current.offsetWidth, height: canvasRef.current.offsetHeight,
                   }}>
                     {guides.v.map((x) => (
-                      <div key={`v${x}`} style={{ position: 'absolute', left: `${x}%`, top: 0, bottom: 0, borderLeft: '1.5px dashed #FF2D55' }} />
+                      <div key={`v${x}`} style={{ position: 'absolute', left: `${x}%`, top: 0, bottom: 0, borderLeft: '2.5px dashed #FF2D55', filter: 'drop-shadow(0 0 3px #FF2D55) drop-shadow(0 0 1px #fff)' }} />
                     ))}
                     {guides.h.map((y) => (
-                      <div key={`h${y}`} style={{ position: 'absolute', top: `${y}%`, left: 0, right: 0, borderTop: '1.5px dashed #FF2D55' }} />
+                      <div key={`h${y}`} style={{ position: 'absolute', top: `${y}%`, left: 0, right: 0, borderTop: '2.5px dashed #FF2D55', filter: 'drop-shadow(0 0 3px #FF2D55) drop-shadow(0 0 1px #fff)' }} />
                     ))}
                   </div>
                 )}
@@ -2057,7 +2074,22 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                 )}
 
                 {/* Double-tap in-place rich text editor overlay */}
-                {editingLayout && (
+                {editingLayout && !richStylesMode && (
+                  <TextEditor
+                    key={editingLayout.box.id}
+                    box={editingLayout.box}
+                    page={activePage}
+                    scale={editingLayout.scale}
+                    boxX={editingLayout.boxX}
+                    boxY={editingLayout.boxY}
+                    boxW={editingLayout.boxW}
+                    boxH={editingLayout.boxH}
+                    onSave={handleSaveRichText}
+                    onMoreStyles={() => setRichStylesMode(true)}
+                    onClose={() => setEditingRichBoxId(null)}
+                  />
+                )}
+                {editingLayout && richStylesMode && (
                   <RichTextOverlay
                     box={editingLayout.box}
                     page={activePage}
@@ -2570,8 +2602,8 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       <div className="fixed bottom-3 left-1/2 -translate-x-1/2 z-40 max-w-2xl w-[96%] sm:w-auto">
         {/* Secondary Popover for Selected Tool (Font Size, Color, Styles, Effects, Format) */}
         {selectedBox && activeSelectedTool && (
-          <div className="mb-2 bg-[#0B0B0F] border-2 border-[#D4AF37]/50 rounded-2xl p-4 shadow-2xl text-white animate-in slide-in-from-bottom-2 max-w-md mx-auto">
-            <div className="flex items-center justify-between mb-3 border-b border-[#262632] pb-2">
+          <div className="mb-2 bg-[#0B0B0F] border-2 border-[#D4AF37]/50 rounded-2xl p-4 shadow-2xl text-white animate-in slide-in-from-bottom-2 max-w-md mx-auto overflow-y-auto overscroll-contain" style={{ maxHeight: '58vh' }}>
+            <div className="sticky -top-4 -mx-4 px-4 pt-4 -mt-4 z-10 bg-[#0B0B0F] flex items-center justify-between mb-3 border-b border-[#262632] pb-2">
               <span className="text-xs font-bold text-[#E5B224] uppercase tracking-wider">
                 {activeSelectedTool === 'styles' && 'Text Styles'}
                 {activeSelectedTool === 'font' && 'Font Family & Library'}
