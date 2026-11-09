@@ -81,11 +81,15 @@ export function renumberLines(lines: string[]): string[] {
  */
 export function listKindFromLabel(label: string | undefined | null): ListKind | null {
   if (!label) return null;
-  const clean = label.trim().toLowerCase().replace(/[\s_-]+/g, ' ');
-  if (/^list ?bullet(s|ed)?\b/.test(clean)) return 'bullet';
-  if (/^list ?number(s|ed)?\b/.test(clean)) return 'number';
-  if (/^(bullet(ed)?|bullets?) list\b/.test(clean)) return 'bullet';
-  if (/^(number(ed)?|numbers?) list\b/.test(clean)) return 'number';
+  const clean = label.trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const words = clean.split(' ').filter((w) => w && !/^\d+$/.test(w));
+  if (!words.length) return null;
+  if (words[0] === 'list' || words[0] === 'a' || words[0] === 'the') words.shift();
+  const first = words[0];
+  if (!first) return null;
+  if (words[1] === 'of') return null; // "Number of pages"
+  if (/^bullet(s|ed)?$/.test(first)) return 'bullet';
+  if (/^(number(s|ed|ing)?)$/.test(first)) return 'number';
   return null;
 }
 
