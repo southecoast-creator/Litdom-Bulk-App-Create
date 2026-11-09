@@ -137,6 +137,9 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   // false = quick Canva-style editor, true = full fonts & effects panel
   const [richStylesMode, setRichStylesMode] = useState(false);
   useEffect(() => {
+    if (editingRichBoxId) setSelectedBoxId(editingRichBoxId);
+  }, [editingRichBoxId]);
+  useEffect(() => {
     if (!editingRichBoxId) setRichStylesMode(false);
   }, [editingRichBoxId]);
   const lastTapRef = useRef<{ time: number; boxId: string | null }>({ time: 0, boxId: null });
@@ -774,11 +777,15 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   };
 
   // Save Rich Text Runs from In-Place Editor
-  const handleSaveRichText = (runs: TextRun[], plainText: string) => {
-    if (!activePage || !selectedBox) return;
-    recordHistory(project);
+  // The box being edited is the one the editor was opened on (not necessarily the selected one)
+  const editTargetBox: TextBoxTemplate | undefined =
+    (editingRichBoxId ? activeBoxes.find((b) => b.id === editingRichBoxId) : undefined) || selectedBox;
 
-    const fieldLabel = selectedBox.fieldLabel;
+  const handleSaveRichText = (runs: TextRun[], plainText: string) => {
+    if (!activePage || !editTargetBox) return;
+    recordHistory(project, true);
+
+    const fieldLabel = editTargetBox.fieldLabel;
     const updatedPages = project.pages.map((p, idx) => {
       if (idx !== activePageIndex) return p;
       return {
@@ -808,10 +815,10 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     word: string,
     styleOverrides: Partial<TextRun>
   ) => {
-    if (!selectedBox || !word) return;
+    if (!editTargetBox || !word) return;
     recordHistory(project);
 
-    const fieldLabel = selectedBox.fieldLabel;
+    const fieldLabel = editTargetBox.fieldLabel;
 
     const updatedPages = project.pages.map((p) => {
       const rawText = p.values[fieldLabel] || '';
