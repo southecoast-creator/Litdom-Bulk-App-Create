@@ -1437,7 +1437,8 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       const popResult = populateDesignsFromSpreadsheet(
         combinedPages,
         project.lastSpreadsheet.rows,
-        project.lastSpreadsheet.mappings
+        project.lastSpreadsheet.mappings,
+        project.template
       );
       combinedPages = popResult.pages;
     }

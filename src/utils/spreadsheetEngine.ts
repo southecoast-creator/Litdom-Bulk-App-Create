@@ -306,10 +306,34 @@ export function parseMarkdownRuns(cellText: string): { plainText: string; runs: 
 export function populateDesignsFromSpreadsheet(
   pages: DesignPage[],
   rows: Record<string, string>[],
-  mappings: Record<string, string>
+  baseMappings: Record<string, string>,
+  template: TextBoxTemplate[] = []
 ): PopulationResult {
   const totalDesigns = pages.length;
   const totalRows = rows.length;
+
+  // Every sheet column that has no explicit mapping yet but exactly matches the label of a text
+  // box on ANY page is mapped to that box. Without this, a box that exists on page 2 but not on
+  // the shared template stays unmapped and never receives its row's text.
+  const mappings: Record<string, string> = { ...baseMappings };
+  if (totalRows > 0) {
+    const sheetHeaders = Object.keys(rows[0]);
+    const labelsOnPages = new Set<string>();
+    for (const p of pages) for (const b of p.textBoxes || []) labelsOnPages.add(b.fieldLabel);
+    for (const label of labelsOnPages) {
+      if (label in mappings) continue; // respect explicit choices, including "not mapped"
+      const header =
+        sheetHeaders.find((h) => h === label) ||
+        sheetHeaders.find((h) => normalizeString(h) === normalizeString(label));
+      if (header) mappings[label] = header;
+    }
+  }
+
+  // Donor boxes (geometry & style) for fields a page is missing: the shared template first,
+  // otherwise the first page that has a box with that label.
+  const donorFor = (label: string): TextBoxTemplate | undefined =>
+    template.find((b) => b.fieldLabel === label) ||
+    pages.flatMap((p) => p.textBoxes || []).find((b) => b.fieldLabel === label);
 
   if (totalDesigns === 0) {
     return {
@@ -395,8 +419,31 @@ export function populateDesignsFromSpreadsheet(
         }
       }
 
+      // A cell that just got text but whose box does not exist on this page gets a box, so the
+      // sheet's content is never silently invisible. Boxes the user deleted on purpose (they
+      // already had text) are not brought back.
+      let updatedBoxes = page.textBoxes;
+      if (page.textBoxes && page.textBoxes.length > 0) {
+        const added: TextBoxTemplate[] = [];
+        for (const [fieldLabel, colName] of Object.entries(mappings)) {
+          if (!colName) continue;
+          const cell = (row[colName] ?? '').trim();
+          const hadText = (page.values?.[fieldLabel] ?? '').trim() !== '';
+          const hasBox = page.textBoxes.some((b) => b.fieldLabel === fieldLabel);
+          if (!cell || hadText || hasBox) continue;
+          const donor = donorFor(fieldLabel);
+          if (!donor || (donor.elementType && donor.elementType !== 'text')) continue;
+          added.push({
+            ...JSON.parse(JSON.stringify(donor)),
+            id: `box_${page.id}_${added.length}_${Math.random().toString(36).substring(2, 6)}`,
+          });
+        }
+        if (added.length > 0) updatedBoxes = [...page.textBoxes, ...added];
+      }
+
       return {
         ...page,
+        ...(updatedBoxes ? { textBoxes: updatedBoxes } : {}),
         values: updatedValues,
         richValues: updatedRichValues,
       };
