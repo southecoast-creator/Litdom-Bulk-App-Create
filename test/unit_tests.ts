@@ -838,6 +838,47 @@ console.log('\n[TEST 22] Case Conversions (aa, AA, Aa)');
   console.log('✅ PASS: Case conversion helpers verified');
 }
 
+// ---------------------------------------------------------------------------
+// TEST 23: Boxes missing on a page still get their row's text
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 23] Sheet text is never left without a box (page 2 lacks "List Bullet" box)');
+{
+  const mk = (label: string, id: string): TextBoxTemplate => ({
+    id, fieldLabel: label, x: 10, y: 10, width: 80, fontFamily: 'Plus Jakarta Sans',
+    fontSize: 24, fontWeight: '400', fontStyle: 'normal', textAlign: 'left', color: '#000000',
+  });
+  const template = [mk('Heading 1', 't1'), mk('List Bullet', 't2')];
+  const pages: DesignPage[] = [
+    { id: 'p1', imageId: 'i', name: 'P1', width: 1000, height: 1000, values: {}, textBoxes: [mk('Heading 1', 'a'), mk('List Bullet', 'b')] },
+    // Page 2 was created when its List Bullet cell was empty, and has an extra label the template lacks
+    { id: 'p2', imageId: 'i', name: 'P2', width: 1000, height: 1000, values: { 'List Bullet': '' }, textBoxes: [mk('Heading 1', 'c'), mk('Subtitle', 'd')] },
+  ];
+  const rows = [
+    { 'Heading 1': 'One', 'List Bullet': 'a\nb', Subtitle: 'S1' },
+    { 'Heading 1': 'Two', 'List Bullet': 'x\ny', Subtitle: 'S2' },
+  ];
+  const result = populateDesignsFromSpreadsheet(
+    pages, rows, { 'Heading 1': 'Heading 1', 'List Bullet': 'List Bullet' }, template
+  );
+  const p2 = result.pages[1];
+  assert.strictEqual(p2.values['Heading 1'], 'Two');
+  assert.strictEqual(p2.values['Subtitle'], 'S2', 'box label not on the template must still be filled');
+  assert.strictEqual(p2.values['List Bullet'], '• x\n• y');
+  assert.ok(p2.textBoxes!.some((b) => b.fieldLabel === 'List Bullet'), 'missing box is added');
+  assert.strictEqual(p2.textBoxes!.length, 3);
+  // Page 1 had no Subtitle box but its row has Subtitle text, so it gets one (nothing duplicated)
+  assert.strictEqual(result.pages[0].textBoxes!.length, 3);
+  assert.strictEqual(result.pages[0].textBoxes!.filter((b) => b.fieldLabel === 'Heading 1').length, 1);
+  assert.strictEqual(result.pages[0].values['Subtitle'], 'S1');
+  // A deliberately deleted box (it already had text) is not re-added
+  const pagesDel: DesignPage[] = [
+    { id: 'p3', imageId: 'i', name: 'P3', width: 1000, height: 1000, values: { 'List Bullet': 'old' }, textBoxes: [mk('Heading 1', 'e')] },
+  ];
+  const r2 = populateDesignsFromSpreadsheet(pagesDel, [rows[0]], { 'Heading 1': 'Heading 1', 'List Bullet': 'List Bullet' }, template);
+  assert.strictEqual(r2.pages[0].textBoxes!.length, 1);
+  console.log('✅ PASS: Every non-empty sheet cell ends up in a visible box; deleted boxes stay deleted');
+}
+
 console.log('\n--- ALL UNIT TESTS COMPLETED SUCCESSFULLY ---');
 
 

@@ -61,7 +61,8 @@ export const SpreadsheetSheet: React.FC<SpreadsheetSheetProps> = ({
       const population = populateDesignsFromSpreadsheet(
         project.pages,
         parsed.rows,
-        autoMap.mappings
+        autoMap.mappings,
+        project.template
       );
 
       const updatedProject: Project = {
@@ -110,7 +111,8 @@ export const SpreadsheetSheet: React.FC<SpreadsheetSheetProps> = ({
     const population = populateDesignsFromSpreadsheet(
       project.pages,
       currentSheet.rows,
-      newMappings
+      newMappings,
+      project.template
     );
 
     const updatedProject: Project = {
@@ -151,7 +153,8 @@ export const SpreadsheetSheet: React.FC<SpreadsheetSheetProps> = ({
     const population = populateDesignsFromSpreadsheet(
       project.pages,
       rows,
-      newMappings
+      newMappings,
+      newTemplate
     );
 
     const updatedPages = population.pages.map((p) => {
@@ -207,7 +210,8 @@ export const SpreadsheetSheet: React.FC<SpreadsheetSheetProps> = ({
     const population = populateDesignsFromSpreadsheet(
       newPages,
       currentSheet.rows,
-      mappings
+      mappings,
+      project.template
     );
 
     onUpdateProject({
