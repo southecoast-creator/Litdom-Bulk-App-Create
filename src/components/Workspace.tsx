@@ -89,6 +89,7 @@ import { FontPanel } from './FontPanel';
 import { RichTextOverlay } from './RichTextOverlay';
 import { TextEditor } from './TextEditor';
 import { SyncLayoutModal } from './SyncLayoutModal';
+import { syncLayoutOntoPage, syncFieldsOntoPage } from '../utils/layoutSync';
 import { AddPanelModal } from './AddPanelModal';
 import { ShapePanelModal, ShapeType } from './ShapePanelModal';
 import { MoreMenuDrawer } from './MoreMenuDrawer';
@@ -739,27 +740,29 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     showToast(mode === 'back' ? 'Sent to back' : mode === 'front' ? 'Brought to front' : mode === 'backward' ? 'Moved back one layer' : 'Moved forward one layer');
   };
 
-  // Copy this design's layout to all designs
+  // Copy this design's layout to all designs. Only positions and styles are copied: every other
+  // design keeps all of its own text boxes and text (nothing is deleted or emptied).
   const handleCopyLayoutToAllDesigns = () => {
     if (!activePage) return;
     recordHistory(project);
     const currentBoxes = activeBoxes;
 
-    const updatedPages = project.pages.map((p) => ({
-      ...p,
-      textBoxes: JSON.parse(JSON.stringify(currentBoxes)),
-    }));
+    const updatedPages = project.pages.map((p, idx) => {
+      if (idx === activePageIndex) return p;
+      const own = p.textBoxes && p.textBoxes.length > 0 ? p.textBoxes : project.template;
+      return { ...p, textBoxes: syncLayoutOntoPage(currentBoxes, own) };
+    });
 
     const updatedProj: Project = {
       ...project,
-      template: JSON.parse(JSON.stringify(currentBoxes)),
+      template: syncLayoutOntoPage(currentBoxes, project.template),
       pages: updatedPages,
       updatedAt: Date.now(),
     };
 
     onUpdateProject(updatedProj);
     triggerAutoSave(updatedProj);
-    showToast('Layout copied to all designs');
+    showToast('Layout synced to all designs (their text is untouched)');
   };
 
   // Handle Updates to Active Page's Text Values
@@ -1007,14 +1010,20 @@ export const Workspace: React.FC<WorkspaceProps> = ({
       onUpdateProject(updatedProj);
       triggerAutoSave(updatedProj);
     } else {
-      const updatedTemplate = updatedBoxes;
+      // Change only the fonts of each design's own boxes (never replace the boxes themselves)
+      const withFonts = (boxes: TextBoxTemplate[]) =>
+        boxes.map((box, idx) =>
+          idx === 0
+            ? { ...box, fontFamily: headingFont, fontWeight: '700' as const }
+            : { ...box, fontFamily: bodyFont, fontWeight: '400' as const }
+        );
       const updatedPages = project.pages.map((p) => ({
         ...p,
-        textBoxes: JSON.parse(JSON.stringify(updatedBoxes)),
+        textBoxes: withFonts(p.textBoxes && p.textBoxes.length > 0 ? p.textBoxes : project.template),
       }));
       const updatedProj: Project = {
         ...project,
-        template: updatedTemplate,
+        template: withFonts(project.template),
         pages: updatedPages,
         updatedAt: Date.now(),
       };
@@ -1033,11 +1042,9 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     recordHistory(project);
     const currentBoxes = activeBoxes;
     const updatedPages = project.pages.map((p, idx) => {
-      if (pageIndices.includes(idx)) {
-        return {
-          ...p,
-          textBoxes: JSON.parse(JSON.stringify(currentBoxes)),
-        };
+      if (pageIndices.includes(idx) && idx !== activePageIndex) {
+        const own = p.textBoxes && p.textBoxes.length > 0 ? p.textBoxes : project.template;
+        return { ...p, textBoxes: syncLayoutOntoPage(currentBoxes, own) };
       }
       return p;
     });
@@ -1048,7 +1055,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     };
     onUpdateProject(updatedProj);
     triggerAutoSave(updatedProj);
-    showToast(`Layout synced to ${pageIndices.length} page(s)`);
+    showToast(`Layout synced to ${pageIndices.length} page(s) (their text is untouched)`);
   };
 
   const handleSyncFieldToPages = (fieldLabel: string, targetPageIndices: number[]) => {
@@ -1063,47 +1070,9 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     if (sourceBoxes.length === 0) return;
 
     const updatedPages = project.pages.map((p, idx) => {
-      if (targetPageIndices.includes(idx)) {
-        const pBoxes = p.textBoxes && p.textBoxes.length > 0 ? [...p.textBoxes] : [...project.template];
-        const updated = pBoxes.map((b) => {
-          const match = sourceBoxes.find((sb) => sb.fieldLabel === b.fieldLabel);
-          if (match) {
-            return {
-              ...b,
-              x: match.x,
-              y: match.y,
-              width: match.width,
-              height: match.height,
-              fontFamily: match.fontFamily,
-              fontSize: match.fontSize,
-              fontWeight: match.fontWeight,
-              fontStyle: match.fontStyle,
-              textAlign: match.textAlign,
-              color: match.color,
-              lineHeight: match.lineHeight,
-              letterSpacing: match.letterSpacing,
-              rotation: match.rotation,
-              textCase: match.textCase,
-              shadow: match.shadow ? JSON.parse(JSON.stringify(match.shadow)) : undefined,
-              stroke: match.stroke ? JSON.parse(JSON.stringify(match.stroke)) : undefined,
-              fill: match.fill ? JSON.parse(JSON.stringify(match.fill)) : undefined,
-              effects: match.effects ? JSON.parse(JSON.stringify(match.effects)) : undefined,
-              fillColor: match.fillColor,
-              strokeColor: match.strokeColor,
-              strokeWidth: match.strokeWidth,
-              gradient: match.gradient ? JSON.parse(JSON.stringify(match.gradient)) : undefined,
-              padding: match.padding,
-            };
-          }
-          return b;
-        });
-        // Fields that don't exist on the target design yet are added there
-        for (const sb of sourceBoxes) {
-          if (!updated.some((b) => b.fieldLabel === sb.fieldLabel)) {
-            updated.push(JSON.parse(JSON.stringify(sb)));
-          }
-        }
-        return { ...p, textBoxes: updated };
+      if (targetPageIndices.includes(idx) && idx !== activePageIndex) {
+        const pBoxes = p.textBoxes && p.textBoxes.length > 0 ? p.textBoxes : project.template;
+        return { ...p, textBoxes: syncFieldsOntoPage(sourceBoxes, pBoxes, p.values) };
       }
       return p;
     });
