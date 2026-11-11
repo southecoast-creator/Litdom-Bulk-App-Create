@@ -99,7 +99,7 @@ export async function parseSpreadsheetFile(file: File): Promise<ParsedSpreadshee
     header: 1,
     defval: '',
     raw: true,
-    blankrows: false,
+    blankrows: true,
   });
 
   if (!rawMatrix || rawMatrix.length === 0) {
@@ -132,7 +132,9 @@ export async function parseSpreadsheetFile(file: File): Promise<ParsedSpreadshee
     const isBlank = rowData.every(
       (c) => c === null || c === undefined || String(c).trim() === ''
     );
-    if (isBlank) continue;
+    // Blank rows in the middle are kept: a blank page in the document is a blank row here, and
+    // dropping it would shift every later page up by one. Trailing blanks are trimmed below.
+    void isBlank;
 
     const rowObj: Record<string, string> = {};
     for (let c = 0; c < headers.length; c++) {
@@ -148,8 +150,23 @@ export async function parseSpreadsheetFile(file: File): Promise<ParsedSpreadshee
   return {
     filename: file.name,
     headers,
-    rows,
+    rows: trimTrailingBlankRows(rows),
   };
+}
+
+/**
+ * Removes fully blank rows from the END only. Blank rows in the middle stand for blank pages and
+ * must stay so that row N keeps matching page N.
+ */
+export function trimTrailingBlankRows<T extends Record<string, unknown>>(rows: T[]): T[] {
+  let end = rows.length;
+  while (
+    end > 0 &&
+    Object.values(rows[end - 1]).every((v) => v === null || v === undefined || String(v).trim() === '')
+  ) {
+    end--;
+  }
+  return rows.slice(0, end);
 }
 
 /**

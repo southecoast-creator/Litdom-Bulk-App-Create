@@ -17,6 +17,7 @@ import { TextBoxTemplate, DesignPage } from '../src/types';
 import {
   calculateAutoMappings,
   populateDesignsFromSpreadsheet,
+  trimTrailingBlankRows,
 } from '../src/utils/spreadsheetEngine';
 
 console.log('--- LITDOM BATCH STUDIO CORE TESTS ---');
@@ -877,6 +878,29 @@ console.log('\n[TEST 23] Sheet text is never left without a box (page 2 lacks "L
   const r2 = populateDesignsFromSpreadsheet(pagesDel, [rows[0]], { 'Heading 1': 'Heading 1', 'List Bullet': 'List Bullet' }, template);
   assert.strictEqual(r2.pages[0].textBoxes!.length, 1);
   console.log('✅ PASS: Every non-empty sheet cell ends up in a visible box; deleted boxes stay deleted');
+}
+
+// ---------------------------------------------------------------------------
+// TEST 24: Blank rows in the middle are kept (blank page = blank row), trailing ones trimmed
+// ---------------------------------------------------------------------------
+console.log('\n[TEST 24] Blank rows keep their position so later pages do not shift');
+{
+  const rows = [
+    { Title: 'Page 1', Body: 'a' },
+    { Title: '', Body: '' }, // blank page 2
+    { Title: 'Page 3', Body: 'c' },
+    { Title: '', Body: '  ' }, // trailing blanks
+    { Title: '', Body: '' },
+  ];
+  const trimmed = trimTrailingBlankRows(rows);
+  assert.strictEqual(trimmed.length, 3);
+  assert.strictEqual(trimmed[1].Title, '');
+  assert.strictEqual(trimmed[2].Title, 'Page 3');
+  const pages = createMockPages(3);
+  const result = populateDesignsFromSpreadsheet(pages, trimmed, { Title: 'Title', Body: 'Body' });
+  assert.strictEqual(result.pages[2].values['Title'], 'Page 3', 'page 3 must receive row 3, not row 2');
+  assert.strictEqual(result.pages[1].values['Title'], '');
+  console.log('✅ PASS: Blank page rows stay in place; page 3 gets row 3');
 }
 
 console.log('\n--- ALL UNIT TESTS COMPLETED SUCCESSFULLY ---');
