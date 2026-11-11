@@ -249,6 +249,8 @@ export interface DocxScanResult {
   maxOccurrences: Record<string, number>;
   generatedColumns: string[];
   spreadsheetData: Record<string, string>[];
+  /** 1-based numbers of pages that have no text (kept as empty rows so row N = page N). */
+  blankPages?: number[];
 }
 
 export type DocxWorkflowStage =

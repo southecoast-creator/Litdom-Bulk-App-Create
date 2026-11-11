@@ -25,6 +25,7 @@ import {
 } from '../utils/docxParser';
 import { DocxScanResult, Project, TextBoxTemplate, DesignPage } from '../types';
 import { storeImageFile, isImageFile, saveProject, createDefaultTemplate } from '../utils/db';
+import { trimTrailingBlankRows } from '../utils/spreadsheetEngine';
 import * as XLSX from 'xlsx';
 
 interface DocxWorkflowModalProps {
@@ -132,7 +133,7 @@ export const DocxWorkflowModal: React.FC<DocxWorkflowModalProps> = ({
       const wb = XLSX.read(buffer, { type: 'array' });
       const sheetName = wb.SheetNames[0];
       const sheet = wb.Sheets[sheetName];
-      const json = XLSX.utils.sheet_to_json<Record<string, any>>(sheet, { defval: '' });
+      const json = XLSX.utils.sheet_to_json<Record<string, any>>(sheet, { defval: '', blankrows: true });
 
       if (json.length === 0) {
         setErrorMsg('The uploaded spreadsheet contains no data rows.');
@@ -148,7 +149,7 @@ export const DocxWorkflowModal: React.FC<DocxWorkflowModalProps> = ({
         return r;
       });
 
-      setRevisedSpreadsheet({ headers, rows: cleanRows });
+      setRevisedSpreadsheet({ headers, rows: trimTrailingBlankRows(cleanRows) });
       setStage('ready_to_approve');
     } catch (err: any) {
       console.error('Failed to read revised spreadsheet:', err);
@@ -372,6 +373,18 @@ export const DocxWorkflowModal: React.FC<DocxWorkflowModalProps> = ({
               </div>
             </div>
 
+            {scanResult.blankPages && scanResult.blankPages.length > 0 && (
+              <div className="p-4 bg-amber-950/40 border border-amber-500/40 rounded-2xl text-xs text-amber-200/90">
+                <div className="font-bold text-amber-300 mb-1">
+                  {scanResult.blankPages.length} blank page(s) found in your document
+                </div>
+                Page {scanResult.blankPages.slice(0, 12).join(', ')}
+                {scanResult.blankPages.length > 12 ? ', …' : ''} {scanResult.blankPages.length === 1 ? 'has' : 'have'} no
+                text. They are kept as empty rows so row N always matches page N. If they are mistakes (a double
+                page break), delete them in Word / Docs and upload the document again.
+              </div>
+            )}
+
             {/* Initial Spreadsheet Download */}
             <div className="p-4 bg-[#17171C] border border-[#262632] rounded-2xl flex items-center justify-between gap-3">
               <div>
@@ -457,6 +470,28 @@ export const DocxWorkflowModal: React.FC<DocxWorkflowModalProps> = ({
                 </div>
               )}
             </div>
+
+            {(() => {
+              const rowCount = revisedSpreadsheet ? revisedSpreadsheet.rows.length : scanResult.pages.length;
+              const tplCount = uploadedTemplates.length;
+              if (tplCount > 0 && tplCount !== rowCount) {
+                return (
+                  <div className="p-3 bg-red-950/40 border border-red-500/40 rounded-2xl text-xs text-red-200">
+                    Count mismatch: {rowCount} row(s)/page(s) but {tplCount} template image(s). Pages and templates are
+                    matched in order, so everything after the first difference can end up with the wrong design.
+                    Make the numbers equal before you continue.
+                  </div>
+                );
+              }
+              if (tplCount > 0) {
+                return (
+                  <div className="text-[11px] text-emerald-400 font-semibold">
+                    ✓ {rowCount} pages = {rowCount} rows = {tplCount} templates
+                  </div>
+                );
+              }
+              return null;
+            })()}
 
             {/* Approval & Population Action */}
             <div className="pt-2 flex items-center justify-end gap-3 border-t border-[#262632]">

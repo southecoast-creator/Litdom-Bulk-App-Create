@@ -160,23 +160,15 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
   const rawPages: DocxBlock[][] = [[]];
   let currentPageIndex = 0;
 
+  // Every explicit page break starts a new page, even when the current page has no text.
+  // That keeps "1 page in the document = 1 row in the sheet", exactly like Word / Docs count pages.
+  const startNewPage = () => {
+    currentPageIndex++;
+    rawPages[currentPageIndex] = [];
+  };
+
   for (let i = 0; i < paragraphs.length; i++) {
     const p = paragraphs[i];
-
-    // Check for explicit page breaks inside paragraph
-    const brs = p.getElementsByTagName('w:br');
-    let hasPageBreak = false;
-    for (let b = 0; b < brs.length; b++) {
-      if (brs[b].getAttribute('w:type') === 'page') {
-        hasPageBreak = true;
-        break;
-      }
-    }
-
-    if (hasPageBreak && rawPages[currentPageIndex].length > 0) {
-      currentPageIndex++;
-      rawPages[currentPageIndex] = [];
-    }
 
     // Determine paragraph style
     const pPr = p.getElementsByTagName('w:pPr')[0];
@@ -197,13 +189,31 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
       }
     }
 
-    // Extract text runs
-    const runs = p.getElementsByTagName('w:r');
+    // Walk the runs in order. Text before a page break stays on the current page, text after it
+    // goes to the next page (a break at the end of a paragraph must not drag its text forward).
     let pText = '';
     let isB = false;
     let isI = false;
     let isU = false;
 
+    const flush = () => {
+      const cleanText = pText.trim();
+      if (cleanText) {
+        rawPages[currentPageIndex].push({
+          style: category,
+          text: cleanText,
+          isBold: isB,
+          isItalic: isI,
+          isUnderline: isU,
+        });
+      }
+      pText = '';
+      isB = false;
+      isI = false;
+      isU = false;
+    };
+
+    const runs = p.getElementsByTagName('w:r');
     for (let r = 0; r < runs.length; r++) {
       const run = runs[r];
       const rPr = run.getElementsByTagName('w:rPr')[0];
@@ -213,34 +223,31 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
         if (rPr.getElementsByTagName('w:u').length > 0) isU = true;
       }
 
-      const tNodes = run.getElementsByTagName('w:t');
-      for (let t = 0; t < tNodes.length; t++) {
-        pText += tNodes[t].textContent || '';
+      for (let c = 0; c < run.childNodes.length; c++) {
+        const child = run.childNodes[c] as Element;
+        const nodeName = child.nodeName;
+        if (nodeName === 'w:t') {
+          pText += child.textContent || '';
+        } else if (nodeName === 'w:br' && child.getAttribute('w:type') === 'page') {
+          flush();
+          startNewPage();
+        }
       }
     }
-
-    const cleanText = pText.trim();
-    if (cleanText) {
-      rawPages[currentPageIndex].push({
-        style: category,
-        text: cleanText,
-        isBold: isB,
-        isItalic: isI,
-        isUnderline: isU,
-      });
-    }
+    flush();
 
     // Check for section break at paragraph end
     const sectPr = pPr?.getElementsByTagName('w:sectPr')[0];
     if (sectPr && i < paragraphs.length - 1 && rawPages[currentPageIndex].length > 0) {
-      currentPageIndex++;
-      rawPages[currentPageIndex] = [];
+      startNewPage();
     }
   }
 
-  // Filter out empty pages, or guarantee at least 1 page
-  const validPages = rawPages.filter((p) => p.length > 0);
-  if (validPages.length === 0) {
+  // Blank pages are KEPT (as empty rows) so row N always matches page N. If nothing at all has
+  // text, fall back to a single title page.
+  const validPages = rawPages;
+  if (!validPages.some((p) => p.length > 0)) {
+    validPages.length = 0;
     validPages.push([
       {
         style: 'Title',
@@ -248,6 +255,10 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
       },
     ]);
   }
+  const blankPages: number[] = [];
+  validPages.forEach((p, idx) => {
+    if (p.length === 0) blankPages.push(idx + 1);
+  });
 
   // Group consecutive blocks of the same style on each page
   const pageScans: DocxPageScan[] = [];
@@ -344,6 +355,7 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
     maxOccurrences,
     generatedColumns,
     spreadsheetData,
+    blankPages,
   };
 }
 

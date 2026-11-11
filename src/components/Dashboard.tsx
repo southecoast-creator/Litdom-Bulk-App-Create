@@ -10,6 +10,7 @@
  */
 
 import { applyListMarkers, listKindFromLabel } from '../utils/listFormat';
+import { trimTrailingBlankRows } from '../utils/spreadsheetEngine';
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Bell,
@@ -202,7 +203,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
       const wb = XLSX.read(buffer, { type: 'array' });
       const sheetName = wb.SheetNames[0];
       const sheet = wb.Sheets[sheetName];
-      const json = XLSX.utils.sheet_to_json<Record<string, any>>(sheet, { defval: '' });
+      const json = XLSX.utils.sheet_to_json<Record<string, any>>(sheet, { defval: '', blankrows: true });
 
       if (json.length === 0) {
         showToast('Spreadsheet contains no data rows.');
@@ -221,7 +222,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
       setPendingSheetData({
         filename: file.name.replace(/\.[^/.]+$/, ''),
         headers,
-        rows: cleanRows,
+        rows: trimTrailingBlankRows(cleanRows),
       });
 
       // Open template selector dialog (Saved template or Plain-white)
