@@ -705,9 +705,22 @@ export async function deleteDesignsFromProjectAtomic(
         }
       }
 
+      // Row N of the sheet belongs to page N, so a deleted page takes its sheet row with it.
+      // Otherwise every page after it would be matched with the wrong row next time.
+      const sheet = targetProject.lastSpreadsheet;
+      let updatedSheet = sheet;
+      if (sheet && Array.isArray(sheet.rows)) {
+        const deletedIdx = new Set<number>();
+        (targetProject.pages || []).forEach((p, i) => {
+          if (pageIdSet.has(p.id)) deletedIdx.add(i);
+        });
+        updatedSheet = { ...sheet, rows: sheet.rows.filter((_, i) => !deletedIdx.has(i)) };
+      }
+
       const updatedProject: Project = {
         ...targetProject,
         pages: retainedPages,
+        ...(updatedSheet ? { lastSpreadsheet: updatedSheet } : {}),
         updatedAt: Date.now(),
       };
 

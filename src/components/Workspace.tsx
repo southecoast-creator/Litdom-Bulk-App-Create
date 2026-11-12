@@ -1505,23 +1505,39 @@ export const Workspace: React.FC<WorkspaceProps> = ({
   };
 
   // Multi-Page Deletion in Thumbnail Strip
+  // Delete pages for good: saves the current edits first (so nothing is lost), removes the pages
+  // AND their sheet rows, and keeps the screen and the saved project identical.
+  const deletePagesByIds = async (ids: string[]): Promise<boolean> => {
+    if (ids.length === 0) return false;
+    if (ids.length >= project.pages.length) {
+      showToast('A project must keep at least one design page.');
+      return false;
+    }
+    recordHistory(project);
+    try {
+      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+      await saveProject(project);
+      const updated = await deleteDesignsFromProjectAtomic(project.id, ids);
+      onUpdateProject(updated);
+      setActivePageIndex((i) => Math.min(i, Math.max(0, updated.pages.length - 1)));
+      setSelectedBoxId(null);
+      return true;
+    } catch (err: any) {
+      console.error('Delete pages error:', err);
+      showToast('Could not delete. Nothing was changed.');
+      return false;
+    }
+  };
+
   const handleConfirmBatchDeletePages = async () => {
     if (selectedPageIds.size === 0) return;
-    recordHistory(project);
-
-    try {
-      const updated = await deleteDesignsFromProjectAtomic(
-        project.id,
-        Array.from(selectedPageIds)
-      );
-      onUpdateProject(updated);
+    const n = selectedPageIds.size;
+    const ok = await deletePagesByIds(Array.from(selectedPageIds));
+    setIsDeleteModalOpen(false);
+    if (ok) {
       setSelectedPageIds(new Set());
       setIsSelectMode(false);
-      setIsDeleteModalOpen(false);
-      showToast('Deleted selected designs and freed storage');
-    } catch (err: any) {
-      console.error('Batch delete error:', err);
-      showToast('Failed to delete selected designs');
+      showToast(`Deleted ${n} page${n > 1 ? 's' : ''}`);
     }
   };
 
@@ -3849,16 +3865,6 @@ export const Workspace: React.FC<WorkspaceProps> = ({
                 <span className="text-[10px] font-bold mt-1 whitespace-nowrap">Sync Layout</span>
               </button>
 
-              {/* [Auto-arrange] stack this page's text in reading order */}
-              <button
-                onClick={handleAutoArrangeThisPage}
-                className="flex flex-col items-center justify-center px-2 py-1 rounded-xl text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24] transition-all min-w-[58px] min-h-[46px]"
-                title="Stack this page's text in order with equal spacing"
-              >
-                <AlignLeft className="w-4 h-4 text-[#E5B224]" />
-                <span className="text-[10px] font-bold mt-1 whitespace-nowrap">Arrange</span>
-              </button>
-
               {/* [+ Add] (BUG-007: Opens Shape & Visual Elements panel) */}
               <button
                 onClick={() => setIsShapePanelOpen(true)}
@@ -4098,18 +4104,12 @@ export const Workspace: React.FC<WorkspaceProps> = ({
           setShowTopThumbnails(!showTopThumbnails);
           setIsMoreMenuOpen(false);
         }}
-        onDeleteCurrentPage={() => {
-          if (project.pages.length <= 1) {
-            alert('A project must have at least one design page.');
-            return;
-          }
+        onDeleteCurrentPage={async () => {
           const targetPageId = activePage?.id;
-          if (targetPageId) {
-            deleteDesignsFromProjectAtomic(project.id, [targetPageId]).then((updated) => {
-              onUpdateProject(updated);
-              setIsMoreMenuOpen(false);
-              showToast('Design deleted');
-            });
+          if (!targetPageId) return;
+          if (await deletePagesByIds([targetPageId])) {
+            setIsMoreMenuOpen(false);
+            showToast('Page deleted');
           }
         }}
         onOpenTemplates={() => {

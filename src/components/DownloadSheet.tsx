@@ -187,7 +187,8 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
             fmt,
             qual,
             customDim,
-            (p) => setProgress(p)
+            (p) => setProgress(p),
+            pagesToExport
           );
           triggerDownload(zipBlob, `${cleanProjectName}_batch.zip`);
         }
