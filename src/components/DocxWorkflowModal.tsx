@@ -26,6 +26,8 @@ import {
 import { DocxScanResult, Project, TextBoxTemplate, DesignPage } from '../types';
 import { storeImageFile, isImageFile, saveProject, createDefaultTemplate } from '../utils/db';
 import { trimTrailingBlankRows } from '../utils/spreadsheetEngine';
+import { autoStackBoxes } from '../utils/autoStack';
+import { preloadTemplateFonts } from '../utils/canvasEngine';
 import * as XLSX from 'xlsx';
 
 interface DocxWorkflowModalProps {
@@ -200,10 +202,17 @@ export const DocxWorkflowModal: React.FC<DocxWorkflowModalProps> = ({
         fontStyle: colName.includes('Quote') ? 'italic' : 'normal',
         textAlign: colName.includes('Title') ? 'center' : 'left',
         color: colName.includes('Title') ? '#D4AF37' : '#FFF8E7',
-        lineHeight: 1.3,
+        lineHeight: 1.5,
         letterSpacing: 0,
       });
     });
+
+    // Fonts must be loaded before text is measured for stacking
+    await preloadTemplateFonts(templateBoxes);
+    let measureCtx: CanvasRenderingContext2D | null = null;
+    try {
+      measureCtx = document.createElement('canvas').getContext('2d');
+    } catch {}
 
     for (let i = 0; i < pageCount; i++) {
       const rowData = finalRows[i] || {};
@@ -255,7 +264,13 @@ export const DocxWorkflowModal: React.FC<DocxWorkflowModalProps> = ({
         width: imgW,
         height: imgH,
         values: pageValues,
-        textBoxes: pageTextBoxes.length > 0 ? pageTextBoxes : JSON.parse(JSON.stringify(templateBoxes)),
+        textBoxes: pageTextBoxes.length > 0
+          ? autoStackBoxes(
+              pageTextBoxes,
+              { id: 'tmp', imageId: '', name: '', width: imgW, height: imgH, values: pageValues },
+              measureCtx
+            ).boxes
+          : JSON.parse(JSON.stringify(templateBoxes)),
       });
     }
 

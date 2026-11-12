@@ -44,6 +44,7 @@ import {
   AlertTriangle,
   Grid,
   RefreshCw,
+  AlignLeft,
   SlidersHorizontal,
   X,
   Image as ImageIcon,
@@ -90,6 +91,7 @@ import { RichTextOverlay } from './RichTextOverlay';
 import { TextEditor } from './TextEditor';
 import { SyncLayoutModal } from './SyncLayoutModal';
 import { syncLayoutOntoPage, syncFieldsOntoPage } from '../utils/layoutSync';
+import { autoStackBoxes } from '../utils/autoStack';
 import { AddPanelModal } from './AddPanelModal';
 import { ShapePanelModal, ShapeType } from './ShapePanelModal';
 import { MoreMenuDrawer } from './MoreMenuDrawer';
@@ -742,16 +744,65 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
   // Copy this design's layout to all designs. Only positions and styles are copied: every other
   // design keeps all of its own text boxes and text (nothing is deleted or emptied).
-  const handleCopyLayoutToAllDesigns = () => {
+  // Re-flow the text of the given pages: stacked in reading order under each other, one shared
+  // margin, equal small gaps. Fonts and styles are kept; no text is changed.
+  const arrangePagesText = (
+    pages: DesignPage[],
+    indices: number[]
+  ): { pages: DesignPage[]; overflowing: number[] } => {
+    let ctx: CanvasRenderingContext2D | null = null;
+    try {
+      ctx = document.createElement('canvas').getContext('2d');
+    } catch {}
+    const overflowing: number[] = [];
+    const next = pages.map((p, idx) => {
+      if (!indices.includes(idx)) return p;
+      const own = p.textBoxes && p.textBoxes.length > 0 ? p.textBoxes : project.template;
+      const res = autoStackBoxes(own, p, ctx, { lineHeight: 1.5 });
+      if (res.overflows) overflowing.push(idx + 1);
+      return { ...p, textBoxes: res.boxes };
+    });
+    return { pages: next, overflowing };
+  };
+
+  const overflowNote = (overflowing: number[]) =>
+    overflowing.length > 0
+      ? ` Page ${overflowing.slice(0, 8).join(', ')}${overflowing.length > 8 ? '…' : ''} ${
+          overflowing.length === 1 ? 'has' : 'have'
+        } more text than fits - shorten it or lower the font size.`
+      : '';
+
+  const handleAutoArrangeThisPage = () => {
+    if (!activePage) return;
+    recordHistory(project);
+    const { pages, overflowing } = arrangePagesText(project.pages, [activePageIndex]);
+    const updatedProj: Project = { ...project, pages, updatedAt: Date.now() };
+    onUpdateProject(updatedProj);
+    triggerAutoSave(updatedProj);
+    showToast(`Text arranged in order.${overflowNote(overflowing)}`);
+  };
+
+  const handleCopyLayoutToAllDesigns = () => copyLayoutToAllDesigns(false);
+
+  const copyLayoutToAllDesigns = (arrange: boolean) => {
     if (!activePage) return;
     recordHistory(project);
     const currentBoxes = activeBoxes;
 
-    const updatedPages = project.pages.map((p, idx) => {
+    let updatedPages = project.pages.map((p, idx) => {
       if (idx === activePageIndex) return p;
       const own = p.textBoxes && p.textBoxes.length > 0 ? p.textBoxes : project.template;
       return { ...p, textBoxes: syncLayoutOntoPage(currentBoxes, own) };
     });
+    let note = '';
+    if (arrange) {
+      const res = arrangePagesText(
+        updatedPages,
+        updatedPages.map((_, i) => i).filter((i) => i !== activePageIndex)
+      );
+      updatedPages = res.pages;
+      note = overflowNote(res.overflowing);
+    }
 
     const updatedProj: Project = {
       ...project,
@@ -762,7 +813,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
 
     onUpdateProject(updatedProj);
     triggerAutoSave(updatedProj);
-    showToast('Layout synced to all designs (their text is untouched)');
+    showToast(`Layout synced to all designs (their text is untouched).${note}`);
   };
 
   // Handle Updates to Active Page's Text Values
@@ -1033,21 +1084,27 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     showToast(`Applied ${headingFont} + ${bodyFont}`);
   };
 
-  const handleSyncAllPages = () => {
-    handleCopyLayoutToAllDesigns();
+  const handleSyncAllPages = (arrange?: boolean) => {
+    copyLayoutToAllDesigns(arrange === true);
   };
 
-  const handleSyncCustomPages = (pageIndices: number[]) => {
+  const handleSyncCustomPages = (pageIndices: number[], arrange?: boolean) => {
     if (!activePage) return;
     recordHistory(project);
     const currentBoxes = activeBoxes;
-    const updatedPages = project.pages.map((p, idx) => {
+    let updatedPages = project.pages.map((p, idx) => {
       if (pageIndices.includes(idx) && idx !== activePageIndex) {
         const own = p.textBoxes && p.textBoxes.length > 0 ? p.textBoxes : project.template;
         return { ...p, textBoxes: syncLayoutOntoPage(currentBoxes, own) };
       }
       return p;
     });
+    let note = '';
+    if (arrange === true) {
+      const res = arrangePagesText(updatedPages, pageIndices.filter((i) => i !== activePageIndex));
+      updatedPages = res.pages;
+      note = overflowNote(res.overflowing);
+    }
     const updatedProj: Project = {
       ...project,
       pages: updatedPages,
@@ -1055,7 +1112,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     };
     onUpdateProject(updatedProj);
     triggerAutoSave(updatedProj);
-    showToast(`Layout synced to ${pageIndices.length} page(s) (their text is untouched)`);
+    showToast(`Layout synced to ${pageIndices.length} page(s) (their text is untouched).${note}`);
   };
 
   const handleSyncFieldToPages = (fieldLabel: string, targetPageIndices: number[]) => {
@@ -3769,6 +3826,16 @@ export const Workspace: React.FC<WorkspaceProps> = ({
               >
                 <RefreshCw className="w-4 h-4 text-[#E5B224]" />
                 <span className="text-[10px] font-bold mt-1 whitespace-nowrap">Sync Layout</span>
+              </button>
+
+              {/* [Auto-arrange] stack this page's text in reading order */}
+              <button
+                onClick={handleAutoArrangeThisPage}
+                className="flex flex-col items-center justify-center px-2 py-1 rounded-xl text-white/90 hover:text-[#E5B224] hover:bg-[#1A1A24] transition-all min-w-[58px] min-h-[46px]"
+                title="Stack this page's text in order with equal spacing"
+              >
+                <AlignLeft className="w-4 h-4 text-[#E5B224]" />
+                <span className="text-[10px] font-bold mt-1 whitespace-nowrap">Arrange</span>
               </button>
 
               {/* [+ Add] (BUG-007: Opens Shape & Visual Elements panel) */}
