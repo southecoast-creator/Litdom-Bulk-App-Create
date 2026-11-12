@@ -5,10 +5,10 @@
  */
 
 import JSZip from 'jszip';
-import { jsPDF } from 'jspdf';
 import { Project, DesignPage, PdfExportSettings } from '../types';
 import { renderDesignToCanvas, preloadTemplateFonts } from './canvasEngine';
-import { getOriginalImageBlob } from './db';
+import { getOriginalImageBlob, getImageRecord } from './db';
+import { PdfBuilder, rgbaToRgb, rgbaToCmyk } from './pdfWriter';
 
 /** Either an exact size, or a multiplier of every page's own size. */
 export interface ExportDimensions {
@@ -70,6 +70,36 @@ export interface RenderedDesignItem {
   file: File;
   filename: string;
   previewUrl: string;
+}
+
+/**
+ * Check, BEFORE anything is rendered, that every page still has its background image and every
+ * image overlay. A missing file is reported by page number instead of being silently left out.
+ */
+export async function verifyPageAssets(project: Project, pageIndexes: number[]): Promise<void> {
+  const problems: string[] = [];
+  for (const idx of pageIndexes) {
+    const page = project.pages[idx];
+    if (!page) {
+      problems.push(`page ${idx + 1} does not exist`);
+      continue;
+    }
+    const bg = page.imageId ? await getImageRecord(page.imageId) : null;
+    if (!bg) problems.push(`page ${idx + 1}: background image is missing`);
+    const boxes = page.textBoxes && page.textBoxes.length > 0 ? page.textBoxes : project.template;
+    for (const b of boxes) {
+      if (b.elementType === 'image_overlay' && b.imageOverlayId) {
+        const ov = await getImageRecord(b.imageOverlayId);
+        if (!ov) problems.push(`page ${idx + 1}: an uploaded image on the page is missing`);
+      }
+    }
+  }
+  if (problems.length > 0) {
+    const shown = problems.slice(0, 6).join('; ');
+    throw new Error(
+      `Download stopped so nothing is left out: ${shown}${problems.length > 6 ? ` (and ${problems.length - 6} more)` : ''}. Re-upload that image, then download again.`
+    );
+  }
 }
 
 /**
@@ -190,29 +220,39 @@ export async function exportAllDesignsZip(
   format: ExportFormat = 'png',
   quality = 0.92,
   customDimensions?: ExportDimensions,
-  onProgress?: (progress: ExportProgress) => void
+  onProgress?: (progress: ExportProgress) => void,
+  pageIndexes?: number[]
 ): Promise<Blob> {
-  const total = project.pages.length;
+  // Only the pages that were chosen (all of them when nothing is chosen)
+  const indexes = pageIndexes ?? project.pages.map((_, i) => i);
+  const total = indexes.length;
   if (total === 0) throw new Error('No designs to export.');
+
+  await verifyPageAssets(project, indexes);
 
   const zip = new JSZip();
 
-  for (let i = 0; i < total; i++) {
+  for (let n = 0; n < total; n++) {
+    const i = indexes[n];
     const page = project.pages[i];
 
     if (onProgress) {
       onProgress({
-        current: i + 1,
+        current: n + 1,
         total,
-        statusText: `Creating ${i + 1} of ${total}…`,
+        statusText: `Creating ${n + 1} of ${total}…`,
       });
     }
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const blob = await exportSingleDesign(project, i, format, quality, customDimensions);
-    const filename = generateFilename(page, i, format);
-    zip.file(filename, blob);
+    // The number in the file name is the page's real number in the project
+    zip.file(generateFilename(page, i, format), blob);
+  }
+
+  if (Object.keys(zip.files).length !== total) {
+    throw new Error('The archive is missing files, so it was not saved. Please try again.');
   }
 
   if (onProgress) {
@@ -232,80 +272,43 @@ export async function exportAllDesignsZip(
 }
 
 /**
- * True CMYK Color Transform
- * Converts RGB canvas image data to simulated CMYK color space for print compliance
+ * Draws print crop marks in the margin around the trimmed page
  */
-function applyCmykTransform(ctx: CanvasRenderingContext2D, width: number, height: number): void {
-  const imgData = ctx.getImageData(0, 0, width, height);
-  const data = imgData.data;
-
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i] / 255;
-    const g = data[i + 1] / 255;
-    const b = data[i + 2] / 255;
-
-    const k = 1 - Math.max(r, Math.max(g, b));
-    const invK = 1 - k || 1;
-    const c = (1 - r - k) / invK;
-    const m = (1 - g - k) / invK;
-    const y = (1 - b - k) / invK;
-
-    // Convert back from CMYK color model to print-safe gamut
-    data[i] = Math.round(255 * (1 - c) * (1 - k));
-    data[i + 1] = Math.round(255 * (1 - m) * (1 - k));
-    data[i + 2] = Math.round(255 * (1 - y) * (1 - k));
-  }
-
-  ctx.putImageData(imgData, 0, 0);
-}
-
-/**
- * Draws standard print crop marks and bleed guides
- */
-function drawCropMarks(ctx: CanvasRenderingContext2D, width: number, height: number, bleed: number): void {
+function drawCropMarks(ctx: CanvasRenderingContext2D, trimX: number, trimY: number, w: number, h: number, bleed: number, len: number): void {
   ctx.save();
   ctx.strokeStyle = '#000000';
   ctx.lineWidth = 1;
-
-  const markLen = bleed * 0.8;
-
-  // Top-Left
-  ctx.beginPath();
-  ctx.moveTo(bleed, 0);
-  ctx.lineTo(bleed, markLen);
-  ctx.moveTo(0, bleed);
-  ctx.lineTo(markLen, bleed);
-  ctx.stroke();
-
-  // Top-Right
-  ctx.beginPath();
-  ctx.moveTo(width - bleed, 0);
-  ctx.lineTo(width - bleed, markLen);
-  ctx.moveTo(width, bleed);
-  ctx.lineTo(width - markLen, bleed);
-  ctx.stroke();
-
-  // Bottom-Left
-  ctx.beginPath();
-  ctx.moveTo(bleed, height);
-  ctx.lineTo(bleed, height - markLen);
-  ctx.moveTo(0, height - bleed);
-  ctx.lineTo(markLen, height - bleed);
-  ctx.stroke();
-
-  // Bottom-Right
-  ctx.beginPath();
-  ctx.moveTo(width - bleed, height);
-  ctx.lineTo(width - bleed, height - markLen);
-  ctx.moveTo(width, height - bleed);
-  ctx.lineTo(width - markLen, height - bleed);
-  ctx.stroke();
-
+  const draw = (x1: number, y1: number, x2: number, y2: number) => {
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+  };
+  const xs = [trimX, trimX + w];
+  const ys = [trimY, trimY + h];
+  for (const x of xs) {
+    const dir = x === trimX ? -1 : 1;
+    for (const y of ys) {
+      const vdir = y === trimY ? -1 : 1;
+      // horizontal mark, starting just outside the bleed
+      draw(x + dir * bleed, y, x + dir * (bleed + len), y);
+      // vertical mark
+      draw(x, y + vdir * bleed, x, y + vdir * (bleed + len));
+    }
+  }
   ctx.restore();
 }
 
+const BLEED_PX = 24;
+const MARK_PX = 36;
+
 /**
- * Export selected designs as a publication-ready multi-page PDF
+ * Export the chosen designs as ONE multi-page PDF, one PDF page per design, in order.
+ *  - Digital: RGB, JPEG-compressed (small, for screens)
+ *  - RGB: RGB, lossless (JPEG-compressed when "Flatten / compress" is on)
+ *  - CMYK: real DeviceCMYK colour for print
+ * "Crop marks & bleed" really adds a bleed margin (the edge of the design is extended) and marks.
+ * If anything is missing the export stops with a clear message instead of leaving pages out.
  */
 export async function exportDesignsToPdf(
   project: Project,
@@ -314,25 +317,16 @@ export async function exportDesignsToPdf(
   onProgress?: (progress: ExportProgress) => void
 ): Promise<Blob> {
   if (pageIndexes.length === 0) throw new Error('No pages selected for PDF export.');
+  await verifyPageAssets(project, pageIndexes);
 
-  const firstPage = project.pages[pageIndexes[0]];
-  const pageW = firstPage?.width || 1080;
-  const pageH = firstPage?.height || 1920;
-
-  const orientation = pageW > pageH ? 'landscape' : 'portrait';
-  const pdf = new jsPDF({
-    orientation,
-    unit: 'px',
-    format: [pageW, pageH],
-    compress: settings.flatten,
-  });
-
+  const pdf = new PdfBuilder(project.name || 'Litdom design');
   const total = pageIndexes.length;
+  const useJpeg = settings.colorMode === 'digital' || (settings.colorMode === 'rgb' && settings.flatten);
 
   for (let i = 0; i < total; i++) {
     const pageIndex = pageIndexes[i];
     const page = project.pages[pageIndex];
-    if (!page) continue;
+    if (!page) throw new Error(`Page ${pageIndex + 1} does not exist.`);
 
     if (onProgress) {
       onProgress({
@@ -349,40 +343,86 @@ export async function exportDesignsToPdf(
     await preloadTemplateFonts(boxesToRender, page.richValues);
 
     const imageBlob = await getOriginalImageBlob(page.imageId);
-    if (!imageBlob) continue;
+    if (!imageBlob) throw new Error(`Page ${pageIndex + 1}: background image is missing.`);
 
-    const canvas = document.createElement('canvas');
-    canvas.width = page.width || 1080;
-    canvas.height = page.height || 1920;
-
-    await renderDesignToCanvas(canvas, boxesToRender, page, imageBlob, {
+    const w = page.width || 1080;
+    const h = page.height || 1920;
+    const design = document.createElement('canvas');
+    design.width = w;
+    design.height = h;
+    await renderDesignToCanvas(design, boxesToRender, page, imageBlob, {
       showBoundingBoxes: false,
-      targetWidth: canvas.width,
-      targetHeight: canvas.height,
+      targetWidth: w,
+      targetHeight: h,
       isExport: true,
     });
 
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      if (settings.colorMode === 'cmyk') {
-        applyCmykTransform(ctx, canvas.width, canvas.height);
-      }
-      if (settings.cropMarksAndBleed) {
-        drawCropMarks(ctx, canvas.width, canvas.height, 40);
+    // Optional bleed + crop marks: a larger sheet with the design in the middle
+    let out = design;
+    let outW = w;
+    let outH = h;
+    if (settings.cropMarksAndBleed) {
+      const m = BLEED_PX + MARK_PX;
+      outW = w + 2 * m;
+      outH = h + 2 * m;
+      out = document.createElement('canvas');
+      out.width = outW;
+      out.height = outH;
+      const octx = out.getContext('2d');
+      if (octx) {
+        octx.fillStyle = '#FFFFFF';
+        octx.fillRect(0, 0, outW, outH);
+        // Bleed: stretch the design's own edge pixels outward
+        const b = BLEED_PX;
+        octx.drawImage(design, 0, 0, w, 1, m, m - b, w, b); // top
+        octx.drawImage(design, 0, h - 1, w, 1, m, m + h, w, b); // bottom
+        octx.drawImage(design, 0, 0, 1, h, m - b, m, b, h); // left
+        octx.drawImage(design, w - 1, 0, 1, h, m + w, m, b, h); // right
+        octx.drawImage(design, 0, 0, 1, 1, m - b, m - b, b, b);
+        octx.drawImage(design, w - 1, 0, 1, 1, m + w, m - b, b, b);
+        octx.drawImage(design, 0, h - 1, 1, 1, m - b, m + h, b, b);
+        octx.drawImage(design, w - 1, h - 1, 1, 1, m + w, m + h, b, b);
+        octx.drawImage(design, m, m);
+        drawCropMarks(octx, m, m, w, h, b, MARK_PX);
       }
     }
 
-    const dataUrl = canvas.toDataURL(settings.flatten ? 'image/jpeg' : 'image/png', 0.95);
+    const ctx = out.getContext('2d');
+    if (!ctx) throw new Error('This device could not prepare the PDF page.');
 
-    if (i > 0) {
-      pdf.addPage([page.width || 1080, page.height || 1920], (page.width || 1080) > (page.height || 1920) ? 'landscape' : 'portrait');
+    if (useJpeg) {
+      const jpg = await new Promise<Blob | null>((res) => out.toBlob((b) => res(b), 'image/jpeg', 0.92));
+      if (!jpg) throw new Error(`Could not prepare page ${pageIndex + 1}.`);
+      await pdf.addPage({
+        width: outW,
+        height: outH,
+        pxWidth: outW,
+        pxHeight: outH,
+        kind: 'jpeg',
+        data: new Uint8Array(await jpg.arrayBuffer()),
+      });
+    } else {
+      const rgba = ctx.getImageData(0, 0, outW, outH).data;
+      await pdf.addPage({
+        width: outW,
+        height: outH,
+        pxWidth: outW,
+        pxHeight: outH,
+        kind: settings.colorMode === 'cmyk' ? 'cmyk' : 'rgb',
+        data: settings.colorMode === 'cmyk' ? rgbaToCmyk(rgba) : rgbaToRgb(rgba),
+      });
     }
 
-    pdf.addImage(dataUrl, settings.flatten ? 'JPEG' : 'PNG', 0, 0, page.width || 1080, page.height || 1920);
-
-    canvas.width = 1;
-    canvas.height = 1;
+    design.width = 1;
+    design.height = 1;
+    if (out !== design) {
+      out.width = 1;
+      out.height = 1;
+    }
   }
 
-  return pdf.output('blob');
+  if (pdf.pages !== total) {
+    throw new Error(`The PDF has ${pdf.pages} pages instead of ${total}, so it was not saved. Please try again.`);
+  }
+  return pdf.build();
 }
