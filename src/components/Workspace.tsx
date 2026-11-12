@@ -92,6 +92,7 @@ import { TextEditor } from './TextEditor';
 import { SyncLayoutModal } from './SyncLayoutModal';
 import { syncLayoutOntoPage, syncFieldsOntoPage } from '../utils/layoutSync';
 import { autoStackBoxes } from '../utils/autoStack';
+import { stackPagesInColumnOrder } from '../utils/sheetLayout';
 import { AddPanelModal } from './AddPanelModal';
 import { ShapePanelModal, ShapeType } from './ShapePanelModal';
 import { MoreMenuDrawer } from './MoreMenuDrawer';
@@ -1481,7 +1482,13 @@ export const Workspace: React.FC<WorkspaceProps> = ({
         project.lastSpreadsheet.mappings,
         project.template
       );
-      combinedPages = popResult.pages;
+      const fresh = combinedPages.map((_, i) => i).filter((i) => i >= project.pages.length);
+      combinedPages = await stackPagesInColumnOrder(
+        popResult.pages,
+        project.lastSpreadsheet.headers,
+        project.lastSpreadsheet.mappings,
+        fresh
+      );
     }
 
     const updatedProj: Project = {

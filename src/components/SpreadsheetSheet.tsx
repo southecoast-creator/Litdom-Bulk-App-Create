@@ -16,6 +16,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { Project, TextBoxTemplate } from '../types';
+import { stackPagesInColumnOrder } from '../utils/sheetLayout';
 import {
   parseSpreadsheetFile,
   calculateAutoMappings,
@@ -65,9 +66,12 @@ export const SpreadsheetSheet: React.FC<SpreadsheetSheetProps> = ({
         project.template
       );
 
+      // Column 1 at the top, the rest directly under it
+      const stacked = await stackPagesInColumnOrder(population.pages, parsed.headers, autoMap.mappings);
+
       const updatedProject: Project = {
         ...project,
-        pages: population.pages,
+        pages: stacked,
         lastSpreadsheet: {
           filename: parsed.filename,
           headers: parsed.headers,
@@ -104,7 +108,7 @@ export const SpreadsheetSheet: React.FC<SpreadsheetSheetProps> = ({
   };
 
 
-  const handleMappingChange = (fieldLabel: string, colName: string) => {
+  const handleMappingChange = async (fieldLabel: string, colName: string) => {
     if (!currentSheet) return;
 
     const newMappings = { ...mappings, [fieldLabel]: colName };
@@ -115,9 +119,18 @@ export const SpreadsheetSheet: React.FC<SpreadsheetSheetProps> = ({
       project.template
     );
 
+    // Pages that just received a new box are re-stacked in column order; others keep their layout
+    const changed = population.pages
+      .map((p, i) => ((p.textBoxes || []).length !== (project.pages[i]?.textBoxes || []).length ? i : -1))
+      .filter((i) => i >= 0);
+    const stackedPages =
+      changed.length > 0
+        ? await stackPagesInColumnOrder(population.pages, currentSheet.headers, newMappings, changed)
+        : population.pages;
+
     const updatedProject: Project = {
       ...project,
-      pages: population.pages,
+      pages: stackedPages,
       lastSpreadsheet: {
         ...currentSheet,
         mappings: newMappings,
@@ -182,7 +195,7 @@ export const SpreadsheetSheet: React.FC<SpreadsheetSheetProps> = ({
     onUpdateProject(updatedProject);
   };
 
-  const handleAddDesignsForExcessRows = () => {
+  const handleAddDesignsForExcessRows = async () => {
     if (!currentSheet || project.pages.length === 0) return;
     const lastPage = project.pages[project.pages.length - 1];
     const needed = currentSheet.rows.length - project.pages.length;
@@ -214,9 +227,12 @@ export const SpreadsheetSheet: React.FC<SpreadsheetSheetProps> = ({
       project.template
     );
 
+    const fresh = newPages.map((_, i) => i).filter((i) => i >= project.pages.length);
+    const stacked = await stackPagesInColumnOrder(population.pages, currentSheet.headers, mappings, fresh);
+
     onUpdateProject({
       ...project,
-      pages: population.pages,
+      pages: stacked,
       updatedAt: Date.now(),
     });
   };

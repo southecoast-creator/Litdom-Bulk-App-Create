@@ -202,7 +202,7 @@ export const DocxWorkflowModal: React.FC<DocxWorkflowModalProps> = ({
         fontWeight,
         fontStyle: colName.includes('Quote') ? 'italic' : 'normal',
         textAlign: colName.includes('Title') ? 'center' : 'left',
-        color: colName.includes('Title') ? '#D4AF37' : '#FFF8E7',
+        color: '#000000',
         lineHeight: 1.5,
         letterSpacing: 0,
       });

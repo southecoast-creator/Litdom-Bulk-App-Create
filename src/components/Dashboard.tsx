@@ -10,7 +10,8 @@
  */
 
 import { applyListMarkers, listKindFromLabel } from '../utils/listFormat';
-import { trimTrailingBlankRows } from '../utils/spreadsheetEngine';
+import { trimTrailingBlankRows, parseMarkdownRuns } from '../utils/spreadsheetEngine';
+import { buildTemplateForHeaders, stackPagesInColumnOrder } from '../utils/sheetLayout';
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Bell,
@@ -31,7 +32,7 @@ import {
   X,
   Check,
 } from 'lucide-react';
-import { Project, StorageBreakdown, SavedTemplate } from '../types';
+import { Project, StorageBreakdown, SavedTemplate, TextBoxTemplate, DesignPage, TextRun } from '../types';
 import {
   getAllProjects,
   saveProject,
@@ -238,11 +239,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
     if (!pendingSheetData) return;
     setLoading(true);
 
-    const baseTemplate: any[] = chosenTemplate
-      ? chosenTemplate.template
-      : createDefaultTemplate();
+    // One text box per sheet column, in column order. A saved template lends its look to boxes
+    // with the same label; every other column gets a fresh black box.
+    const baseTemplate: TextBoxTemplate[] = buildTemplateForHeaders(
+      pendingSheetData.headers,
+      chosenTemplate ? chosenTemplate.template : []
+    );
 
-    const pages: any[] = [];
+    let pages: DesignPage[] = [];
     const rows = pendingSheetData.rows;
 
     for (let i = 0; i < rows.length; i++) {
@@ -266,25 +270,38 @@ export const Dashboard: React.FC<DashboardProps> = ({ onOpenProject }) => {
         imageId = stored.imageId;
       }
 
+      // Each cell goes only to the box of its own column. List columns get bullets / numbers and
+      // **bold** / *italic* / __underline__ markers become real formatting.
       const values: Record<string, string> = {};
-      baseTemplate.forEach((box) => {
-        const matchingCol = pendingSheetData.headers.find(
-          (h) => h.toLowerCase() === box.fieldLabel.toLowerCase()
-        ) || pendingSheetData.headers[0];
-        const kind = listKindFromLabel(matchingCol) || listKindFromLabel(box.fieldLabel);
-        values[box.fieldLabel] = kind ? applyListMarkers(row[matchingCol] || '', kind) : row[matchingCol] || '';
+      const richValues: Record<string, TextRun[]> = {};
+      const boxes: TextBoxTemplate[] = [];
+      baseTemplate.forEach((box, bi) => {
+        const col = box.fieldLabel;
+        const kind = listKindFromLabel(col);
+        const rawCell = row[col] || '';
+        const { plainText, runs } = parseMarkdownRuns(kind ? applyListMarkers(rawCell, kind) : rawCell);
+        values[col] = plainText;
+        if (runs.some((r) => r.bold || r.italic || r.underline || r.strike)) richValues[col] = runs;
+        // Empty cells make no box
+        if (plainText.trim()) {
+          boxes.push({ ...JSON.parse(JSON.stringify(box)), id: `box_${i}_${bi}_${Math.random().toString(36).substring(2, 6)}` });
+        }
       });
 
       pages.push({
         id: `page_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`,
-        imageId,
+        imageId: imageId as string,
         name: `Design ${i + 1}`,
         width: imgW,
         height: imgH,
         values,
-        textBoxes: JSON.parse(JSON.stringify(baseTemplate)),
+        richValues,
+        textBoxes: boxes,
       });
     }
+
+    // Column 1 at the top, the rest directly under it, 1.5 line spacing
+    pages = await stackPagesInColumnOrder(pages, pendingSheetData.headers);
 
     const newProject: Project = {
       id: `proj_sheet_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
