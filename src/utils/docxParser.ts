@@ -6,6 +6,7 @@
  */
 
 import JSZip from 'jszip';
+import { ColumnKey, orderColumnKeys } from './columnOrder';
 import * as XLSX from 'xlsx';
 import {
   DOCX_STANDARD_STYLES,
@@ -264,9 +265,11 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
   const pageScans: DocxPageScan[] = [];
   const detectedStylesSet = new Set<string>();
   const maxOccurrences: Record<string, number> = {};
+  const pageSequences: ColumnKey[][] = [];
 
   validPages.forEach((pageBlocks, idx) => {
     const occurrences: Record<string, string[]> = {};
+    const sequence: ColumnKey[] = [];
     let currentStyle: string | null = null;
     let currentText = '';
 
@@ -274,6 +277,7 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
       if (currentStyle && currentText) {
         if (!occurrences[currentStyle]) occurrences[currentStyle] = [];
         occurrences[currentStyle].push(currentText);
+        sequence.push({ style: currentStyle, n: occurrences[currentStyle].length - 1 });
         detectedStylesSet.add(currentStyle);
       }
       currentStyle = null;
@@ -296,6 +300,7 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
       maxOccurrences[st] = Math.max(maxOccurrences[st] || 0, groups.length);
     }
 
+    pageSequences.push(sequence);
     pageScans.push({
       pageNumber: idx + 1,
       blocks: pageBlocks,
@@ -310,41 +315,25 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
     return (idxA >= 0 ? idxA : 999) - (idxB >= 0 ? idxB : 999);
   });
 
-  const generatedColumns: string[] = [];
-  for (const st of detectedStylesList) {
-    const count = maxOccurrences[st] || 1;
-    if (count === 1) {
-      generatedColumns.push(st);
-    } else {
-      for (let c = 1; c <= count; c++) {
-        generatedColumns.push(`${st} - ${c}`);
-      }
-    }
-  }
+  // Columns follow the READING ORDER of the document (Heading 1, Paragraph, Heading 1 - 2,
+  // Paragraph - 2 ...), not "all headings, then all paragraphs", so stacking text from the sheet
+  // gives the same order as the Word page.
+  const columnName = (k: ColumnKey) => ((maxOccurrences[k.style] || 1) === 1 ? k.style : `${k.style} - ${k.n + 1}`);
+  const generatedColumns: string[] = orderColumnKeys(pageSequences).map(columnName);
 
   // Generate Spreadsheet Data rows: Row 1 = Headers (handled by xlsx), Row 2+ = Page 1, Page 2...
   const spreadsheetData: Record<string, string>[] = [];
 
   for (const scan of pageScans) {
     const row: Record<string, string> = {};
-    // Ensure all columns exist in the object
     for (const col of generatedColumns) {
       row[col] = '';
     }
-
-    for (const st of detectedStylesList) {
-      const groups = scan.occurrences[st] || [];
-      const count = maxOccurrences[st] || 1;
-
-      if (count === 1) {
-        row[st] = groups[0] || '';
-      } else {
-        for (let c = 0; c < count; c++) {
-          row[`${st} - ${c + 1}`] = groups[c] || '';
-        }
-      }
+    for (const [st, groups] of Object.entries(scan.occurrences)) {
+      groups.forEach((text, c) => {
+        row[columnName({ style: st, n: c })] = text;
+      });
     }
-
     spreadsheetData.push(row);
   }
 

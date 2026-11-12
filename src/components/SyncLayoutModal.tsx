@@ -11,18 +11,19 @@
  * 100% preservation of destination text wording/content—only copies layout, styling, and geometry.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { X, Check, CheckSquare, Square, ChevronDown } from 'lucide-react';
 import { Project, TextBoxTemplate } from '../types';
 import { getThumbnailBlob, createManagedObjectUrl } from '../utils/db';
+import { groupPagesByLayout, pagesWithFields } from '../utils/layoutGroups';
 
 interface SyncLayoutModalProps {
   project: Project;
   activePageIndex: number;
   isOpen: boolean;
   onClose: () => void;
-  onSyncAll: () => void;
-  onSyncCustomPages: (pageIndices: number[]) => void;
+  onSyncAll: (arrange?: boolean) => void;
+  onSyncCustomPages: (pageIndices: number[], arrange?: boolean) => void;
   onSyncFieldsToPages: (fieldLabels: string[], targetPageIndices: number[]) => void;
 }
 
@@ -36,12 +37,14 @@ export const SyncLayoutModal: React.FC<SyncLayoutModalProps> = ({
   onSyncFieldsToPages,
 }) => {
   // Section 1: Sync This Design's Layout
-  const [designDestination, setDesignDestination] = useState<'this' | 'all' | 'custom'>('this');
+  const [designDestination, setDesignDestination] = useState<'group' | 'this' | 'all' | 'custom'>('group');
   const [customDesignPages, setCustomDesignPages] = useState<Set<number>>(new Set());
+  const [groupPages, setGroupPages] = useState<Set<number>>(new Set());
+  const [arrangeText, setArrangeText] = useState(false);
 
   // Section 2: Sync Text Fields Layout
   const [selectedFields, setSelectedFields] = useState<Set<string>>(new Set());
-  const [fieldsDestination, setFieldsDestination] = useState<'this' | 'all' | 'custom'>('all');
+  const [fieldsDestination, setFieldsDestination] = useState<'tagged' | 'this' | 'all' | 'custom'>('tagged');
   const [customFieldPages, setCustomFieldPages] = useState<Set<number>>(new Set());
 
   // Thumbnail URLs for visual picker
@@ -54,6 +57,29 @@ export const SyncLayoutModal: React.FC<SyncLayoutModalProps> = ({
       ? activePage.textBoxes
       : project.template;
   const fields = availableBoxes.map((b) => b.fieldLabel);
+
+  // Pages that share a layout (same field types in the same order)
+  const layoutGroups = useMemo(
+    () => groupPagesByLayout(project.pages, project.template),
+    [project.pages, project.template]
+  );
+  const activeGroup = layoutGroups.find((g) => g.pages.includes(activePageIndex));
+
+  // Pages that have the chosen field tag(s)
+  const taggedPages = useMemo(
+    () =>
+      pagesWithFields(project.pages, project.template, Array.from(selectedFields)).filter(
+        (i) => i !== activePageIndex
+      ),
+    [project.pages, project.template, selectedFields, activePageIndex]
+  );
+
+  // Pre-tick the pages that share this page's layout whenever the window opens
+  useEffect(() => {
+    if (!isOpen) return;
+    setGroupPages(new Set((activeGroup?.pages || []).filter((i) => i !== activePageIndex)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, activePageIndex, layoutGroups]);
 
   // Load thumbnail Blobs on open
   useEffect(() => {
@@ -104,14 +130,21 @@ export const SyncLayoutModal: React.FC<SyncLayoutModalProps> = ({
       return;
     }
     if (designDestination === 'all') {
-      onSyncAll();
+      onSyncAll(arrangeText);
       setFeedback('Layout synced to all designs!');
+    } else if (designDestination === 'group') {
+      if (groupPages.size === 0) {
+        setFeedback('No other page shares this layout. Tick pages or pick Custom.');
+        return;
+      }
+      onSyncCustomPages(Array.from(groupPages), arrangeText);
+      setFeedback(`Layout synced to ${groupPages.size} page(s) with the same layout!`);
     } else {
       if (customDesignPages.size === 0) {
         setFeedback('Select at least one target design.');
         return;
       }
-      onSyncCustomPages(Array.from(customDesignPages));
+      onSyncCustomPages(Array.from(customDesignPages), arrangeText);
       setFeedback(`Layout synced to ${customDesignPages.size} design(s)!`);
     }
 
@@ -131,6 +164,12 @@ export const SyncLayoutModal: React.FC<SyncLayoutModalProps> = ({
     let targetIndices: number[] = [];
     if (fieldsDestination === 'this') {
       targetIndices = [activePageIndex];
+    } else if (fieldsDestination === 'tagged') {
+      if (taggedPages.length === 0) {
+        setFeedback('No other page has this field.');
+        return;
+      }
+      targetIndices = taggedPages;
     } else if (fieldsDestination === 'all') {
       targetIndices = Array.from({ length: project.pages.length }, (_, i) => i);
     } else {
@@ -182,42 +221,107 @@ export const SyncLayoutModal: React.FC<SyncLayoutModalProps> = ({
             </p>
           </div>
 
-          {/* Destination Selector: This Page, All, Custom */}
-          <div className="grid grid-cols-3 gap-2">
-            <button
-              type="button"
-              onClick={() => setDesignDestination('this')}
-              className={`py-2 px-1 rounded-2xl text-xs font-bold transition-all text-center ${
-                designDestination === 'this'
-                  ? 'bg-black text-white shadow-md'
-                  : 'bg-black/15 text-black hover:bg-black/25'
-              }`}
-            >
-              This Page
-            </button>
-            <button
-              type="button"
-              onClick={() => setDesignDestination('all')}
-              className={`py-2 px-1 rounded-2xl text-xs font-bold transition-all text-center ${
-                designDestination === 'all'
-                  ? 'bg-black text-white shadow-md'
-                  : 'bg-black/15 text-black hover:bg-black/25'
-              }`}
-            >
-              All Designs
-            </button>
-            <button
-              type="button"
-              onClick={() => setDesignDestination('custom')}
-              className={`py-2 px-1 rounded-2xl text-xs font-bold transition-all text-center ${
-                designDestination === 'custom'
-                  ? 'bg-black text-white shadow-md'
-                  : 'bg-black/15 text-black hover:bg-black/25'
-              }`}
-            >
-              Custom
-            </button>
+          {/* Destination Selector: Same Layout, This Page, All, Custom */}
+          <div className="grid grid-cols-4 gap-1.5">
+            {([
+              ['group', 'Same Layout'],
+              ['this', 'This Page'],
+              ['all', 'All'],
+              ['custom', 'Custom'],
+            ] as const).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setDesignDestination(key)}
+                className={`py-2 px-1 rounded-2xl text-[11px] font-bold transition-all text-center leading-tight ${
+                  designDestination === key
+                    ? 'bg-black text-white shadow-md'
+                    : 'bg-black/15 text-black hover:bg-black/25'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
+
+          {/* Pages grouped by shared layout */}
+          {designDestination === 'group' && (
+            <div className="bg-black/10 rounded-2xl p-2.5 flex flex-col gap-2 max-h-56 overflow-y-auto border border-black/15">
+              <span className="text-[11px] font-bold text-black/80">
+                Pages that share a layout. Tick the pages to sync:
+              </span>
+              {layoutGroups.map((g) => {
+                const isMine = g.pages.includes(activePageIndex);
+                const targets = g.pages.filter((i) => i !== activePageIndex);
+                const allOn = targets.length > 0 && targets.every((i) => groupPages.has(i));
+                return (
+                  <div
+                    key={g.id}
+                    className={`rounded-xl p-2 border-2 ${isMine ? 'border-black bg-white/60' : 'border-black/15 bg-white/30'}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[11px] font-extrabold">
+                        Layout {g.id}
+                        {isMine ? ' (this page)' : ''}
+                      </div>
+                      {targets.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const next = new Set(groupPages);
+                            targets.forEach((i) => (allOn ? next.delete(i) : next.add(i)));
+                            setGroupPages(next);
+                          }}
+                          className="text-[10px] font-bold underline"
+                        >
+                          {allOn ? 'Untick all' : 'Tick all'}
+                        </button>
+                      )}
+                    </div>
+                    <div className="text-[10px] text-black/70 mb-1.5">{g.summary}</div>
+                    <div className="flex flex-wrap gap-1">
+                      {g.pages.map((i) =>
+                        i === activePageIndex ? (
+                          <span key={i} className="px-2 py-1 rounded-lg text-[10px] font-bold bg-black/20 text-black">
+                            Page {i + 1} (source)
+                          </span>
+                        ) : (
+                          <button
+                            key={i}
+                            type="button"
+                            onClick={() => {
+                              const next = new Set(groupPages);
+                              if (next.has(i)) next.delete(i);
+                              else next.add(i);
+                              setGroupPages(next);
+                            }}
+                            className={`px-2 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 ${
+                              groupPages.has(i) ? 'bg-black text-white' : 'bg-black/15 text-black'
+                            }`}
+                          >
+                            {groupPages.has(i) ? <CheckSquare className="w-3 h-3 text-[#D4AF37]" /> : <Square className="w-3 h-3 text-black/50" />}
+                            Page {i + 1}
+                          </button>
+                        )
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {designDestination !== 'this' && (
+            <label className="flex items-start gap-2 text-[11px] font-semibold text-black/80 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={arrangeText}
+                onChange={(e) => setArrangeText(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>Also stack the text neatly (in order, equal spacing) on those pages. Fonts and styles are kept.</span>
+            </label>
+          )}
 
           {/* Visual Thumbnails Picker if Custom */}
           {designDestination === 'custom' && (
@@ -320,41 +424,39 @@ export const SyncLayoutModal: React.FC<SyncLayoutModalProps> = ({
           </div>
 
           {/* Destination Selector for Fields */}
-          <div className="grid grid-cols-3 gap-2">
-            <button
-              type="button"
-              onClick={() => setFieldsDestination('this')}
-              className={`py-2 px-1 rounded-2xl text-xs font-bold transition-all text-center ${
-                fieldsDestination === 'this'
-                  ? 'bg-black text-white shadow-md'
-                  : 'bg-black/15 text-black hover:bg-black/25'
-              }`}
-            >
-              This Page
-            </button>
-            <button
-              type="button"
-              onClick={() => setFieldsDestination('all')}
-              className={`py-2 px-1 rounded-2xl text-xs font-bold transition-all text-center ${
-                fieldsDestination === 'all'
-                  ? 'bg-black text-white shadow-md'
-                  : 'bg-black/15 text-black hover:bg-black/25'
-              }`}
-            >
-              All Designs
-            </button>
-            <button
-              type="button"
-              onClick={() => setFieldsDestination('custom')}
-              className={`py-2 px-1 rounded-2xl text-xs font-bold transition-all text-center ${
-                fieldsDestination === 'custom'
-                  ? 'bg-black text-white shadow-md'
-                  : 'bg-black/15 text-black hover:bg-black/25'
-              }`}
-            >
-              Custom
-            </button>
+          <div className="grid grid-cols-4 gap-1.5">
+            {([
+              ['tagged', 'Pages with Field'],
+              ['this', 'This Page'],
+              ['all', 'All'],
+              ['custom', 'Custom'],
+            ] as const).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setFieldsDestination(key)}
+                className={`py-2 px-1 rounded-2xl text-[11px] font-bold transition-all text-center leading-tight ${
+                  fieldsDestination === key
+                    ? 'bg-black text-white shadow-md'
+                    : 'bg-black/15 text-black hover:bg-black/25'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
+          {fieldsDestination === 'tagged' && (
+            <div className="text-[11px] font-semibold text-black/75 text-center">
+              {selectedFields.size === 0
+                ? 'Choose a field above.'
+                : taggedPages.length === 0
+                ? 'No other page has this field.'
+                : `${taggedPages.length} other page(s) have this field: ${taggedPages
+                    .slice(0, 10)
+                    .map((i) => i + 1)
+                    .join(', ')}${taggedPages.length > 10 ? '…' : ''}`}
+            </div>
+          )}
 
           {/* Visual Thumbnails Picker if Custom for Fields */}
           {fieldsDestination === 'custom' && (
