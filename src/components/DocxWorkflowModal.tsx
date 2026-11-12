@@ -23,9 +23,10 @@ import {
   parseDocxFile,
   downloadDocxSpreadsheet,
 } from '../utils/docxParser';
-import { DocxScanResult, Project, TextBoxTemplate, DesignPage } from '../types';
+import { DocxScanResult, Project, TextBoxTemplate, DesignPage, TextRun } from '../types';
 import { storeImageFile, isImageFile, saveProject, createDefaultTemplate } from '../utils/db';
-import { trimTrailingBlankRows } from '../utils/spreadsheetEngine';
+import { trimTrailingBlankRows, parseMarkdownRuns } from '../utils/spreadsheetEngine';
+import { applyListMarkers, listKindFromLabel } from '../utils/listFormat';
 import { autoStackBoxes } from '../utils/autoStack';
 import { preloadTemplateFonts } from '../utils/canvasEngine';
 import * as XLSX from 'xlsx';
@@ -220,11 +221,17 @@ export const DocxWorkflowModal: React.FC<DocxWorkflowModalProps> = ({
 
       // Build text values and non-empty placeholder boxes for this specific page
       const pageValues: Record<string, string> = {};
+      const pageRichValues: Record<string, TextRun[]> = {};
       const pageTextBoxes: TextBoxTemplate[] = [];
 
       finalHeaders.forEach((col, idx) => {
-        const textVal = rowData[col] || '';
+        // List columns get bullets / numbers, and **bold** / *italic* / __underline__ markers from
+        // Word become real rich-text runs at the same position.
+        const kind = listKindFromLabel(col);
+        const rawVal = rowData[col] || '';
+        const { plainText: textVal, runs: valRuns } = parseMarkdownRuns(kind ? applyListMarkers(rawVal, kind) : rawVal);
         pageValues[col] = textVal;
+        if (valRuns.some((r) => r.bold || r.italic || r.underline || r.strike)) pageRichValues[col] = valRuns;
 
         // "Empty cells must not produce placeholders" - from Master Brief
         if (textVal.trim()) {
@@ -264,6 +271,7 @@ export const DocxWorkflowModal: React.FC<DocxWorkflowModalProps> = ({
         width: imgW,
         height: imgH,
         values: pageValues,
+        richValues: pageRichValues,
         textBoxes: pageTextBoxes.length > 0
           ? autoStackBoxes(
               pageTextBoxes,

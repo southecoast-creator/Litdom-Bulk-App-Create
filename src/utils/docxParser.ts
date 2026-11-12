@@ -192,23 +192,53 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
 
     // Walk the runs in order. Text before a page break stays on the current page, text after it
     // goes to the next page (a break at the end of a paragraph must not drag its text forward).
-    let pText = '';
+    // Inline formatting is kept per run as markdown markers (**bold**, *italic*, __underline__)
+    // so the sheet cell carries it and the template renders it at the same position.
+    let segs: { text: string; b: boolean; i: boolean; u: boolean }[] = [];
     let isB = false;
     let isI = false;
     let isU = false;
+    const flagOn = (el: Element | undefined) => {
+      if (!el) return false;
+      const v = (el.getAttribute('w:val') || '').toLowerCase();
+      return !(v === '0' || v === 'false' || v === 'none');
+    };
 
     const flush = () => {
-      const cleanText = pText.trim();
+      const plain = segs.map((s) => s.text).join('');
+      const cleanText = plain.trim();
       if (cleanText) {
+        const allSame = (k: 'b' | 'i' | 'u') => segs.every((s) => !s.text.trim() || s[k]);
+        // A whole paragraph that is bold in a heading/title style is already bold by its style
+        const keepWhole = !/title|heading|quote/i.test(String(category));
+        const wrap = (t: string, s: { b: boolean; i: boolean; u: boolean }) => {
+          if (!t.trim()) return t;
+          const lead = t.match(/^\s*/)![0];
+          const trail = t.match(/\s*$/)![0];
+          const core = t.trim();
+          let m = core;
+          if (s.b && (keepWhole || !allSame('b'))) m = `**${core}**`;
+          else if (s.i && (keepWhole || !allSame('i'))) m = `*${core}*`;
+          else if (s.u && (keepWhole || !allSame('u'))) m = `__${core}__`;
+          return lead + m + trail;
+        };
+        // Merge neighbouring runs that share a format, then wrap each group
+        const merged: typeof segs = [];
+        for (const sg of segs) {
+          const last = merged[merged.length - 1];
+          if (last && last.b === sg.b && last.i === sg.i && last.u === sg.u) last.text += sg.text;
+          else merged.push({ ...sg });
+        }
+        const md = merged.map((sg) => wrap(sg.text, sg)).join('').trim();
         rawPages[currentPageIndex].push({
           style: category,
-          text: cleanText,
+          text: md,
           isBold: isB,
           isItalic: isI,
           isUnderline: isU,
         });
       }
-      pText = '';
+      segs = [];
       isB = false;
       isI = false;
       isU = false;
@@ -218,17 +248,18 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
     for (let r = 0; r < runs.length; r++) {
       const run = runs[r];
       const rPr = run.getElementsByTagName('w:rPr')[0];
-      if (rPr) {
-        if (rPr.getElementsByTagName('w:b').length > 0) isB = true;
-        if (rPr.getElementsByTagName('w:i').length > 0) isI = true;
-        if (rPr.getElementsByTagName('w:u').length > 0) isU = true;
-      }
+      const rb = flagOn(rPr?.getElementsByTagName('w:b')[0]);
+      const ri = flagOn(rPr?.getElementsByTagName('w:i')[0]);
+      const ru = flagOn(rPr?.getElementsByTagName('w:u')[0]);
+      if (rb) isB = true;
+      if (ri) isI = true;
+      if (ru) isU = true;
 
       for (let c = 0; c < run.childNodes.length; c++) {
         const child = run.childNodes[c] as Element;
         const nodeName = child.nodeName;
         if (nodeName === 'w:t') {
-          pText += child.textContent || '';
+          segs.push({ text: child.textContent || '', b: rb, i: ri, u: ru });
         } else if (nodeName === 'w:br' && child.getAttribute('w:type') === 'page') {
           flush();
           startNewPage();

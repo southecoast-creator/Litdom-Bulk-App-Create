@@ -1255,17 +1255,32 @@ export const Workspace: React.FC<WorkspaceProps> = ({
     if (!selectedBox || !activePage) return;
     recordHistory(project);
 
+    // The copy gets its OWN field label and its own copy of the text, so editing it can never
+    // change the original (values are stored per field label on the page).
+    const taken = new Set(activeBoxes.map((b) => b.fieldLabel));
+    const baseLabel = selectedBox.fieldLabel.replace(/ copy( \d+)?$/, '');
+    let newLabel = `${baseLabel} copy`;
+    for (let n = 2; taken.has(newLabel); n++) newLabel = `${baseLabel} copy ${n}`;
+
     const duplicated: TextBoxTemplate = {
       ...JSON.parse(JSON.stringify(selectedBox)),
       id: `dup_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      fieldLabel: newLabel,
       x: Math.min(90 - (selectedBox.width || 25), selectedBox.x + 3),
       y: Math.min(85, selectedBox.y + 3),
     };
 
     const updatedBoxes = [...activeBoxes, duplicated];
-    const updatedPages = project.pages.map((p, idx) =>
-      idx === activePageIndex ? { ...p, textBoxes: updatedBoxes } : p
-    );
+    const updatedPages = project.pages.map((p, idx) => {
+      if (idx !== activePageIndex) return p;
+      const next: DesignPage = { ...p, textBoxes: updatedBoxes };
+      const orig = selectedBox.fieldLabel;
+      next.values = { ...p.values, [newLabel]: p.values?.[orig] ?? '' };
+      if (p.richValues?.[orig]) {
+        next.richValues = { ...p.richValues, [newLabel]: JSON.parse(JSON.stringify(p.richValues[orig])) };
+      }
+      return next;
+    });
     const updatedProj: Project = {
       ...project,
       pages: updatedPages,
