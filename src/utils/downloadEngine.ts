@@ -274,10 +274,10 @@ export async function exportAllDesignsZip(
 /**
  * Draws print crop marks in the margin around the trimmed page
  */
-function drawCropMarks(ctx: CanvasRenderingContext2D, trimX: number, trimY: number, w: number, h: number, bleed: number, len: number): void {
+function drawCropMarks(ctx: CanvasRenderingContext2D, trimX: number, trimY: number, w: number, h: number, bleed: number, len: number, lineWidth = 1): void {
   ctx.save();
   ctx.strokeStyle = '#000000';
-  ctx.lineWidth = 1;
+  ctx.lineWidth = lineWidth;
   const draw = (x1: number, y1: number, x2: number, y2: number) => {
     ctx.beginPath();
     ctx.moveTo(x1, y1);
@@ -299,6 +299,8 @@ function drawCropMarks(ctx: CanvasRenderingContext2D, trimX: number, trimY: numb
   ctx.restore();
 }
 
+const PDF_SCALE = 2;
+const PDF_MAX_PIXELS = 12_000_000;
 const BLEED_PX = 24;
 const MARK_PX = 36;
 
@@ -345,8 +347,12 @@ export async function exportDesignsToPdf(
     const imageBlob = await getOriginalImageBlob(page.imageId);
     if (!imageBlob) throw new Error(`Page ${pageIndex + 1}: background image is missing.`);
 
-    const w = page.width || 1080;
-    const h = page.height || 1920;
+    // Draw at up to 2x the page size so small text stays sharp when zoomed or printed
+    const logicalW = page.width || 1080;
+    const logicalH = page.height || 1920;
+    const k = Math.max(1, Math.min(PDF_SCALE, Math.sqrt(PDF_MAX_PIXELS / (logicalW * logicalH))));
+    const w = Math.round(logicalW * k);
+    const h = Math.round(logicalH * k);
     const design = document.createElement('canvas');
     design.width = w;
     design.height = h;
@@ -362,7 +368,7 @@ export async function exportDesignsToPdf(
     let outW = w;
     let outH = h;
     if (settings.cropMarksAndBleed) {
-      const m = BLEED_PX + MARK_PX;
+      const m = Math.round((BLEED_PX + MARK_PX) * k);
       outW = w + 2 * m;
       outH = h + 2 * m;
       out = document.createElement('canvas');
@@ -373,7 +379,7 @@ export async function exportDesignsToPdf(
         octx.fillStyle = '#FFFFFF';
         octx.fillRect(0, 0, outW, outH);
         // Bleed: stretch the design's own edge pixels outward
-        const b = BLEED_PX;
+        const b = Math.round(BLEED_PX * k);
         octx.drawImage(design, 0, 0, w, 1, m, m - b, w, b); // top
         octx.drawImage(design, 0, h - 1, w, 1, m, m + h, w, b); // bottom
         octx.drawImage(design, 0, 0, 1, h, m - b, m, b, h); // left
@@ -383,7 +389,7 @@ export async function exportDesignsToPdf(
         octx.drawImage(design, 0, h - 1, 1, 1, m - b, m + h, b, b);
         octx.drawImage(design, w - 1, h - 1, 1, 1, m + w, m + h, b, b);
         octx.drawImage(design, m, m);
-        drawCropMarks(octx, m, m, w, h, b, MARK_PX);
+        drawCropMarks(octx, m, m, w, h, b, Math.round(MARK_PX * k), k);
       }
     }
 
@@ -391,11 +397,11 @@ export async function exportDesignsToPdf(
     if (!ctx) throw new Error('This device could not prepare the PDF page.');
 
     if (useJpeg) {
-      const jpg = await new Promise<Blob | null>((res) => out.toBlob((b) => res(b), 'image/jpeg', 0.92));
+      const jpg = await new Promise<Blob | null>((res) => out.toBlob((b) => res(b), 'image/jpeg', 0.95));
       if (!jpg) throw new Error(`Could not prepare page ${pageIndex + 1}.`);
       await pdf.addPage({
-        width: outW,
-        height: outH,
+        width: outW / k,
+        height: outH / k,
         pxWidth: outW,
         pxHeight: outH,
         kind: 'jpeg',
@@ -404,8 +410,8 @@ export async function exportDesignsToPdf(
     } else {
       const rgba = ctx.getImageData(0, 0, outW, outH).data;
       await pdf.addPage({
-        width: outW,
-        height: outH,
+        width: outW / k,
+        height: outH / k,
         pxWidth: outW,
         pxHeight: outH,
         kind: settings.colorMode === 'cmyk' ? 'cmyk' : 'rgb',
