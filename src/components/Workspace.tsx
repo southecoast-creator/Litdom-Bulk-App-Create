@@ -44,7 +44,6 @@ import {
   AlertTriangle,
   Grid,
   RefreshCw,
-  AlignLeft,
   SlidersHorizontal,
   X,
   Image as ImageIcon,
