@@ -65,7 +65,7 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
   const [customWidth, setCustomWidth] = useState<number>(activePage?.width || 1080);
   const [customHeight, setCustomHeight] = useState<number>(activePage?.height || 1920);
   const [isSizeEditOpen, setIsSizeEditOpen] = useState(false);
-  const [sharp2x, setSharp2x] = useState(false);
+  const [sharp2x, setSharp2x] = useState(true);
 
   // PDF Settings popup (Page 9)
   const [isPdfSettingsOpen, setIsPdfSettingsOpen] = useState(false);
