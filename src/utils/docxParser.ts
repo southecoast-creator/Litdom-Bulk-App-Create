@@ -91,6 +91,96 @@ function parseStylesXml(xmlStr: string): Record<string, string> {
 }
 
 /**
+ * Paragraph spacing (twips; 20 twips = 1pt). A gap of about a line or more between two paragraphs
+ * means "new paragraph = new text box". Plain Enter with Word's small default spacing does not.
+ */
+const PARAGRAPH_GAP_TWIPS = 200; // 10pt, a bit less than one line of body text
+const LINE_TWIPS = 240;
+const AUTO_SPACING_TWIPS = 280;
+
+interface Spacing {
+  before?: number;
+  after?: number;
+  contextual?: boolean;
+}
+interface StyleSpacingInfo {
+  defaults: Spacing;
+  styles: Record<string, { basedOn?: string; sp: Spacing }>;
+}
+
+/** Reads <w:spacing> and <w:contextualSpacing> out of a paragraph-properties element */
+function readSpacing(pPr: Element | undefined | null): Spacing {
+  const out: Spacing = {};
+  if (!pPr) return out;
+  const el = pPr.getElementsByTagName('w:spacing')[0];
+  if (el) {
+    const side = (name: 'before' | 'after') => {
+      const auto = el.getAttribute(`w:${name}Autospacing`);
+      if (auto === '1' || auto === 'true') return AUTO_SPACING_TWIPS;
+      const lines = el.getAttribute(`w:${name}Lines`);
+      if (lines !== null && lines !== '' && !isNaN(Number(lines))) return (Number(lines) / 100) * LINE_TWIPS;
+      const tw = el.getAttribute(`w:${name}`);
+      if (tw !== null && tw !== '' && !isNaN(Number(tw))) return Number(tw);
+      return undefined;
+    };
+    out.before = side('before');
+    out.after = side('after');
+  }
+  const ctx = pPr.getElementsByTagName('w:contextualSpacing')[0];
+  if (ctx) {
+    const v = (ctx.getAttribute('w:val') || '').toLowerCase();
+    out.contextual = !(v === '0' || v === 'false');
+  }
+  return out;
+}
+
+function parseStyleSpacing(xmlStr: string): StyleSpacingInfo {
+  const info: StyleSpacingInfo = { defaults: {}, styles: {} };
+  try {
+    const doc = new DOMParser().parseFromString(xmlStr, 'application/xml');
+    const dd = doc.getElementsByTagName('w:pPrDefault')[0];
+    if (dd) info.defaults = readSpacing(dd.getElementsByTagName('w:pPr')[0]);
+    const nodes = doc.getElementsByTagName('w:style');
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      const id = n.getAttribute('w:styleId') || '';
+      if (!id) continue;
+      const basedOn = n.getElementsByTagName('w:basedOn')[0]?.getAttribute('w:val') || undefined;
+      // only the style's own paragraph properties (not its table/run properties)
+      let pPr: Element | undefined;
+      for (let c = 0; c < n.childNodes.length; c++) {
+        if (n.childNodes[c].nodeName === 'w:pPr') pPr = n.childNodes[c] as Element;
+      }
+      info.styles[id] = { basedOn, sp: readSpacing(pPr) };
+    }
+  } catch (err) {
+    console.warn('Failed to read paragraph spacing from styles.xml:', err);
+  }
+  return info;
+}
+
+/** The spacing a paragraph really has: its own settings, else its style chain, else the defaults */
+function resolveSpacing(pPr: Element | undefined | null, styleId: string, info: StyleSpacingInfo): Required<Spacing> {
+  const direct = readSpacing(pPr);
+  let before = direct.before;
+  let after = direct.after;
+  let contextual = direct.contextual;
+  let id: string | undefined = styleId;
+  const seen = new Set<string>();
+  while (id && !seen.has(id) && info.styles[id]) {
+    seen.add(id);
+    const st = info.styles[id];
+    if (before === undefined) before = st.sp.before;
+    if (after === undefined) after = st.sp.after;
+    if (contextual === undefined) contextual = st.sp.contextual;
+    id = st.basedOn;
+  }
+  if (before === undefined) before = info.defaults.before;
+  if (after === undefined) after = info.defaults.after;
+  return { before: before ?? 0, after: after ?? 0, contextual: contextual ?? false };
+}
+
+/**
  * Parses word/numbering.xml -> "numId:ilvl" -> number format (bullet, decimal, lowerLetter ...).
  * Word's real bullet / numbered lists usually carry the generic "List Paragraph" style and
  * only reveal their kind through numbering.xml.
@@ -142,9 +232,11 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
 
   const stylesXmlEntry = loadedZip.file('word/styles.xml');
   let styleMap: Record<string, string> = {};
+  let styleSpacing: StyleSpacingInfo = { defaults: {}, styles: {} };
   if (stylesXmlEntry) {
     const stylesXml = await stylesXmlEntry.async('string');
     styleMap = parseStylesXml(stylesXml);
+    styleSpacing = parseStyleSpacing(stylesXml);
   }
 
   const numberingEntry = loadedZip.file('word/numbering.xml');
@@ -163,7 +255,18 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
 
   // Every explicit page break starts a new page, even when the current page has no text.
   // That keeps "1 page in the document = 1 row in the sheet", exactly like Word / Docs count pages.
+  // A blank line (empty paragraph) in Word means "new paragraph": the next block starts its own
+  // sheet column instead of being glued onto the previous one.
+  let sawBlank = false;
+  // Spacing of the previous paragraph, to measure the gap before the next one
+  let prevAfter = 0;
+  let prevStyleId = '';
+  let prevContextual = false;
   const startNewPage = () => {
+    sawBlank = false;
+    prevAfter = 0;
+    prevStyleId = '';
+    prevContextual = false;
     currentPageIndex++;
     rawPages[currentPageIndex] = [];
   };
@@ -177,6 +280,7 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
     const styleId = pStyle?.getAttribute('w:val') || 'Normal';
     const styleName = styleMap[styleId] || styleId;
     let category = normalizeStyleName(styleId, styleName);
+    const spacing = resolveSpacing(pPr, styleId, styleSpacing);
 
     // Real Word bullet / numbered lists (w:numPr) -> List Bullet / List Number
     const numPr = pPr?.getElementsByTagName('w:numPr')[0];
@@ -236,7 +340,13 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
           isBold: isB,
           isItalic: isI,
           isUnderline: isU,
+          afterBlank:
+            sawBlank ||
+            (rawPages[currentPageIndex].length > 0 &&
+              !(prevContextual && spacing.contextual && prevStyleId === styleId) &&
+              prevAfter + spacing.before >= PARAGRAPH_GAP_TWIPS),
         });
+        sawBlank = false;
       }
       segs = [];
       isB = false;
@@ -267,6 +377,21 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
       }
     }
     flush();
+
+    // An empty paragraph (nothing in it, no page break, no picture) is a blank line
+    if (
+      (p.textContent || '').trim() === '' &&
+      p.getElementsByTagName('w:br').length === 0 &&
+      p.getElementsByTagName('w:drawing').length === 0 &&
+      p.getElementsByTagName('w:pict').length === 0 &&
+      rawPages[currentPageIndex].length > 0
+    ) {
+      sawBlank = true;
+    }
+
+    prevAfter = spacing.after;
+    prevStyleId = styleId;
+    prevContextual = spacing.contextual;
 
     // Check for section break at paragraph end
     const sectPr = pPr?.getElementsByTagName('w:sectPr')[0];
@@ -316,7 +441,7 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
     };
 
     for (const b of pageBlocks) {
-      if (b.style === currentStyle) {
+      if (b.style === currentStyle && !b.afterBlank) {
         currentText += `\n${b.text}`;
       } else {
         commitGroup();
