@@ -163,7 +163,11 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
 
   // Every explicit page break starts a new page, even when the current page has no text.
   // That keeps "1 page in the document = 1 row in the sheet", exactly like Word / Docs count pages.
+  // A blank line (empty paragraph) in Word means "new paragraph": the next block starts its own
+  // sheet column instead of being glued onto the previous one.
+  let sawBlank = false;
   const startNewPage = () => {
+    sawBlank = false;
     currentPageIndex++;
     rawPages[currentPageIndex] = [];
   };
@@ -236,7 +240,9 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
           isBold: isB,
           isItalic: isI,
           isUnderline: isU,
+          afterBlank: sawBlank,
         });
+        sawBlank = false;
       }
       segs = [];
       isB = false;
@@ -267,6 +273,17 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
       }
     }
     flush();
+
+    // An empty paragraph (nothing in it, no page break, no picture) is a blank line
+    if (
+      (p.textContent || '').trim() === '' &&
+      p.getElementsByTagName('w:br').length === 0 &&
+      p.getElementsByTagName('w:drawing').length === 0 &&
+      p.getElementsByTagName('w:pict').length === 0 &&
+      rawPages[currentPageIndex].length > 0
+    ) {
+      sawBlank = true;
+    }
 
     // Check for section break at paragraph end
     const sectPr = pPr?.getElementsByTagName('w:sectPr')[0];
@@ -316,7 +333,7 @@ export async function parseDocxFile(file: File | Blob, filename: string = 'docum
     };
 
     for (const b of pageBlocks) {
-      if (b.style === currentStyle) {
+      if (b.style === currentStyle && !b.afterBlank) {
         currentText += `\n${b.text}`;
       } else {
         commitGroup();
