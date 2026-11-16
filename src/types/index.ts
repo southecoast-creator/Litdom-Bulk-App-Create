@@ -234,8 +234,6 @@ export interface DocxBlock {
   isBold?: boolean;
   isItalic?: boolean;
   isUnderline?: boolean;
-  /** True when a blank line came right before this paragraph (so it starts its own column) */
-  afterBlank?: boolean;
 }
 
 export interface DocxPageScan {
