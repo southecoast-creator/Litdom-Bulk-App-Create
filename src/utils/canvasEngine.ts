@@ -1207,6 +1207,11 @@ export interface RenderCanvasOptions {
   targetHeight?: number;
   dpr?: number; // Optional explicit DPR multiplier (defaults to window.devicePixelRatio)
   isExport?: boolean; // When true, dpr is locked to 1 for exact native file export
+  /**
+   * Draw this instead of the stored page image (used by "Remove Background" on export).
+   * The stored original and the decoded-image cache are never touched.
+   */
+  backgroundOverride?: HTMLCanvasElement | HTMLImageElement;
 }
 
 /**
@@ -1232,10 +1237,14 @@ export async function renderDesignToCanvas(
   await ensureOverlayImages(boxesToRender, !!options.isExport);
 
   // Load decoded background image strictly under page.imageId
-  const img = await getOrLoadDecodedImage(page.imageId, imageSrcOrBlob);
+  const override = options.backgroundOverride;
+  const img: HTMLCanvasElement | HTMLImageElement =
+    override ?? (await getOrLoadDecodedImage(page.imageId, imageSrcOrBlob));
+  const imgW = override instanceof HTMLCanvasElement ? override.width : (img as HTMLImageElement).naturalWidth;
+  const imgH = override instanceof HTMLCanvasElement ? override.height : (img as HTMLImageElement).naturalHeight;
 
-  const nativeW = page.width || img.naturalWidth || 1000;
-  const nativeH = page.height || img.naturalHeight || 1000;
+  const nativeW = page.width || imgW || 1000;
+  const nativeH = page.height || imgH || 1000;
 
   // 1. Integer-snapped layout dimensions
   const targetW = Math.round(options.targetWidth || nativeW);

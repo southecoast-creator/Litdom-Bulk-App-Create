@@ -33,7 +33,8 @@ import {
   ExportFormat,
   ExportProgress,
 } from '../utils/downloadEngine';
-import { getThumbnailBlob, createManagedObjectUrl } from '../utils/db';
+import { getThumbnailBlob, createManagedObjectUrl, getOriginalImageBlob } from '../utils/db';
+import { makeBackgroundRemovalPreview } from '../utils/backgroundRemoval';
 
 interface DownloadSheetProps {
   project: Project;
@@ -66,6 +67,14 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
   const [customHeight, setCustomHeight] = useState<number>(activePage?.height || 1920);
   const [isSizeEditOpen, setIsSizeEditOpen] = useState(false);
   const [sharp2x, setSharp2x] = useState(true);
+
+  // Optional "Remove Background" (off unless the person ticks it; independent of the size)
+  const [removeBackground, setRemoveBackground] = useState(false);
+  const [bgPreview, setBgPreview] = useState<{ url: string | null; message: string | null; busy: boolean }>({
+    url: null,
+    message: null,
+    busy: false,
+  });
 
   // PDF Settings popup (Page 9)
   const [isPdfSettingsOpen, setIsPdfSettingsOpen] = useState(false);
@@ -110,7 +119,35 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
     }
   }, [isThumbnailPickerOpen, project.pages]);
 
+  // Preview of the uploaded picture with its background removed (the page text is not part of it)
+  useEffect(() => {
+    if (!isOpen || !removeBackground || !isSizeEditOpen || !activePage?.imageId) return;
+    let cancelled = false;
+    setBgPreview({ url: null, message: null, busy: true });
+    (async () => {
+      try {
+        const blob = await getOriginalImageBlob(activePage.imageId);
+        if (!blob) throw new Error('missing image');
+        const { dataUrl, result } = await makeBackgroundRemovalPreview(blob);
+        if (cancelled) return;
+        setBgPreview({
+          url: dataUrl,
+          message: dataUrl ? null : result.alreadyTransparent ? 'Already transparent.' : result.reason ?? null,
+          busy: false,
+        });
+      } catch {
+        if (!cancelled) setBgPreview({ url: null, message: 'Preview unavailable.', busy: false });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, removeBackground, isSizeEditOpen, activePage?.imageId]);
+
   if (!isOpen) return null;
+
+  // JPG cannot be transparent, so a JPG + Remove Background export is saved as PNG (and we say so)
+  const forcedPng = removeBackground && (fileType === '.jpg' || fileType === '.jpeg');
 
   const getQualityNumeric = () => {
     switch (quality) {
@@ -176,9 +213,12 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
             pagesToExport[0],
             fmt,
             qual,
-            customDim
+            customDim,
+            { removeBackground }
           );
-          const ext = fileType === '.jpg' ? 'jpg' : fileType === '.jpeg' ? 'jpeg' : fileType === '.webp' ? 'webp' : 'png';
+          const ext = forcedPng
+            ? 'png'
+            : fileType === '.jpg' ? 'jpg' : fileType === '.jpeg' ? 'jpeg' : fileType === '.webp' ? 'webp' : 'png';
           triggerDownload(blob, `${cleanProjectName}_page_${pagesToExport[0] + 1}.${ext}`);
         } else {
           // Multiple Images -> ZIP
@@ -188,7 +228,8 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
             qual,
             customDim,
             (p) => setProgress(p),
-            pagesToExport
+            pagesToExport,
+            { removeBackground }
           );
           triggerDownload(zipBlob, `${cleanProjectName}_batch.zip`);
         }
@@ -296,6 +337,45 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
                     placeholder="Height"
                   />
                 </div>
+
+                {/* Optional: remove the uploaded picture's background (off by default) */}
+                <label className="flex items-center justify-between bg-black text-white rounded-xl px-2.5 py-1.5 text-[11px] font-bold cursor-pointer">
+                  <span>Remove Background</span>
+                  <input
+                    type="checkbox"
+                    checked={removeBackground}
+                    onChange={(e) => setRemoveBackground(e.target.checked)}
+                    className="w-3.5 h-3.5 accent-amber-400 cursor-pointer"
+                  />
+                </label>
+                {removeBackground && (
+                  <div className="flex flex-col gap-1.5">
+                    {forcedPng && (
+                      <span className="text-[10px] font-semibold leading-tight text-black/80">
+                        JPG cannot be transparent, so this will be saved as PNG.
+                      </span>
+                    )}
+                    <div
+                      className="w-full h-24 rounded-xl border border-black/30 overflow-hidden flex items-center justify-center"
+                      style={{
+                        backgroundImage:
+                          'conic-gradient(#ccc 25%, #fff 0 50%, #ccc 0 75%, #fff 0)',
+                        backgroundSize: '12px 12px',
+                      }}
+                    >
+                      {bgPreview.busy ? (
+                        <RefreshCw className="w-4 h-4 animate-spin text-black/60" />
+                      ) : bgPreview.url ? (
+                        <img src={bgPreview.url} alt="Background removed preview" className="max-w-full max-h-full object-contain" />
+                      ) : (
+                        <span className="text-[10px] font-semibold text-black/70 px-2 text-center leading-tight bg-[#F4D58D]/90 rounded">
+                          {bgPreview.message || 'No preview'}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 <button
                   onClick={() => setIsSizeEditOpen(false)}
                   className="bg-black text-white font-bold text-xs py-1.5 rounded-xl hover:bg-black/80 transition-colors"
@@ -380,6 +460,13 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {fileType !== '.pdf' && removeBackground && (
+          <div className="text-[11px] font-semibold text-black -mt-2">
+            Background will be removed (transparent).
+            {forcedPng ? ' JPG cannot be transparent, so it saves as PNG.' : ''}
           </div>
         )}
 
