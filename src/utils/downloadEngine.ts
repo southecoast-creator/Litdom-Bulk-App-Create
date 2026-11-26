@@ -9,6 +9,7 @@ import { Project, DesignPage, PdfExportSettings } from '../types';
 import { renderDesignToCanvas, preloadTemplateFonts } from './canvasEngine';
 import { getOriginalImageBlob, getImageRecord } from './db';
 import { PdfBuilder, rgbaToRgb, rgbaToCmyk } from './pdfWriter';
+import { removeBackgroundFromBlob } from './backgroundRemoval';
 
 /** Either an exact size, or a multiplier of every page's own size. */
 export interface ExportDimensions {
@@ -24,6 +25,17 @@ export interface ExportProgress {
 }
 
 export type ExportFormat = 'png' | 'jpeg' | 'webp' | 'pdf';
+
+/** Optional extras for image exports. Nothing here is on unless the person turns it on. */
+export interface ImageExportOptions {
+  /** Remove the uploaded page image's background (real transparency). Text and shapes are untouched. */
+  removeBackground?: boolean;
+  /**
+   * JPG cannot hold transparency. When Remove Background is on and the format stays JPG, the
+   * removed areas are filled with this colour (default white). The format is never changed.
+   */
+  jpgFillColor?: string;
+}
 
 function slugify(text: string): string {
   return text
@@ -110,10 +122,12 @@ export async function exportSingleDesign(
   pageIndex: number,
   format: ExportFormat = 'png',
   quality = 0.92,
-  customDimensions?: ExportDimensions
+  customDimensions?: ExportDimensions,
+  imageOptions?: ImageExportOptions
 ): Promise<Blob> {
   const page = project.pages[pageIndex];
   if (!page) throw new Error('Design page not found.');
+  const removeBackground = !!imageOptions?.removeBackground;
 
   const boxesToRender =
     page.textBoxes && page.textBoxes.length > 0 ? page.textBoxes : project.template;
@@ -122,6 +136,25 @@ export async function exportSingleDesign(
 
   const imageBlob = await getOriginalImageBlob(page.imageId);
   if (!imageBlob) throw new Error(`Could not load background image for ${page.name}`);
+
+  // Work on a COPY of the picture. The stored original is never modified.
+  let cutout: HTMLCanvasElement | undefined;
+  if (removeBackground) {
+    const cut = await removeBackgroundFromBlob(imageBlob);
+    if (!cut.result.applied && cut.result.alreadyTransparent) {
+      // A PNG that already has a transparent background: keep it exactly as it is
+      cut.canvas.width = 1;
+      cut.canvas.height = 1;
+    } else if (!cut.result.applied) {
+      cut.canvas.width = 1;
+      cut.canvas.height = 1;
+      throw new Error(
+        `Background was not removed on ${page.name}. ${cut.result.reason ?? ''} ` +
+          'Nothing was downloaded, so you do not get a file that still has its background.'
+      );
+    }
+    else cutout = cut.canvas;
+  }
 
   const canvas = document.createElement('canvas');
   let targetW = customDimensions?.width || page.width || 1000;
@@ -141,17 +174,42 @@ export async function exportSingleDesign(
     targetWidth: targetW,
     targetHeight: targetH,
     isExport: true,
+    backgroundOverride: cutout,
   });
 
   let mimeType = 'image/png';
   if (format === 'jpeg') mimeType = 'image/jpeg';
   else if (format === 'webp') mimeType = 'image/webp';
 
+  // JPG has no transparency (it would turn black). Fill the removed areas with the chosen colour,
+  // and keep the format the person selected.
+  let toEncode = canvas;
+  if (removeBackground && format === 'jpeg') {
+    const flat = document.createElement('canvas');
+    flat.width = canvas.width;
+    flat.height = canvas.height;
+    const fctx = flat.getContext('2d');
+    if (fctx) {
+      fctx.fillStyle = imageOptions?.jpgFillColor || '#FFFFFF';
+      fctx.fillRect(0, 0, flat.width, flat.height);
+      fctx.drawImage(canvas, 0, 0);
+      toEncode = flat;
+    }
+  }
+
   return new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob(
+    toEncode.toBlob(
       (b) => {
         canvas.width = 1;
         canvas.height = 1;
+        if (toEncode !== canvas) {
+          toEncode.width = 1;
+          toEncode.height = 1;
+        }
+        if (cutout) {
+          cutout.width = 1;
+          cutout.height = 1;
+        }
         if (b) resolve(b);
         else reject(new Error('Failed to generate image file.'));
       },
@@ -170,7 +228,8 @@ export async function exportDesignsToFiles(
   format: ExportFormat = 'png',
   quality = 0.92,
   customDimensions?: ExportDimensions,
-  onProgress?: (progress: ExportProgress) => void
+  onProgress?: (progress: ExportProgress) => void,
+  imageOptions?: ImageExportOptions
 ): Promise<RenderedDesignItem[]> {
   const results: RenderedDesignItem[] = [];
   const total = pageIndexes.length;
@@ -190,7 +249,7 @@ export async function exportDesignsToFiles(
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    const blob = await exportSingleDesign(project, pageIndex, format, quality, customDimensions);
+    const blob = await exportSingleDesign(project, pageIndex, format, quality, customDimensions, imageOptions);
     const filename = generateFilename(page, pageIndex, format);
     let mimeType = 'image/png';
     if (format === 'jpeg') mimeType = 'image/jpeg';
@@ -221,7 +280,8 @@ export async function exportAllDesignsZip(
   quality = 0.92,
   customDimensions?: ExportDimensions,
   onProgress?: (progress: ExportProgress) => void,
-  pageIndexes?: number[]
+  pageIndexes?: number[],
+  imageOptions?: ImageExportOptions
 ): Promise<Blob> {
   // Only the pages that were chosen (all of them when nothing is chosen)
   const indexes = pageIndexes ?? project.pages.map((_, i) => i);
@@ -246,7 +306,7 @@ export async function exportAllDesignsZip(
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    const blob = await exportSingleDesign(project, i, format, quality, customDimensions);
+    const blob = await exportSingleDesign(project, i, format, quality, customDimensions, imageOptions);
     // The number in the file name is the page's real number in the project
     zip.file(generateFilename(page, i, format), blob);
   }
