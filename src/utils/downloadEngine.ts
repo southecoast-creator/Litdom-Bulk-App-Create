@@ -30,14 +30,11 @@ export type ExportFormat = 'png' | 'jpeg' | 'webp' | 'pdf';
 export interface ImageExportOptions {
   /** Remove the uploaded page image's background (real transparency). Text and shapes are untouched. */
   removeBackground?: boolean;
-}
-
-/**
- * JPG cannot hold transparency. When the background is removed, a JPG request is exported as PNG
- * instead of being silently flattened onto a colour. (WebP and PNG keep their alpha channel.)
- */
-export function effectiveFormat(format: ExportFormat, removeBackground?: boolean): ExportFormat {
-  return removeBackground && format === 'jpeg' ? 'png' : format;
+  /**
+   * JPG cannot hold transparency. When Remove Background is on and the format stays JPG, the
+   * removed areas are filled with this colour (default white). The format is never changed.
+   */
+  jpgFillColor?: string;
 }
 
 function slugify(text: string): string {
@@ -131,7 +128,6 @@ export async function exportSingleDesign(
   const page = project.pages[pageIndex];
   if (!page) throw new Error('Design page not found.');
   const removeBackground = !!imageOptions?.removeBackground;
-  const outFormat = effectiveFormat(format, removeBackground);
 
   const boxesToRender =
     page.textBoxes && page.textBoxes.length > 0 ? page.textBoxes : project.template;
@@ -182,14 +178,34 @@ export async function exportSingleDesign(
   });
 
   let mimeType = 'image/png';
-  if (outFormat === 'jpeg') mimeType = 'image/jpeg';
-  else if (outFormat === 'webp') mimeType = 'image/webp';
+  if (format === 'jpeg') mimeType = 'image/jpeg';
+  else if (format === 'webp') mimeType = 'image/webp';
+
+  // JPG has no transparency (it would turn black). Fill the removed areas with the chosen colour,
+  // and keep the format the person selected.
+  let toEncode = canvas;
+  if (removeBackground && format === 'jpeg') {
+    const flat = document.createElement('canvas');
+    flat.width = canvas.width;
+    flat.height = canvas.height;
+    const fctx = flat.getContext('2d');
+    if (fctx) {
+      fctx.fillStyle = imageOptions?.jpgFillColor || '#FFFFFF';
+      fctx.fillRect(0, 0, flat.width, flat.height);
+      fctx.drawImage(canvas, 0, 0);
+      toEncode = flat;
+    }
+  }
 
   return new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob(
+    toEncode.toBlob(
       (b) => {
         canvas.width = 1;
         canvas.height = 1;
+        if (toEncode !== canvas) {
+          toEncode.width = 1;
+          toEncode.height = 1;
+        }
         if (cutout) {
           cutout.width = 1;
           cutout.height = 1;
@@ -215,7 +231,6 @@ export async function exportDesignsToFiles(
   onProgress?: (progress: ExportProgress) => void,
   imageOptions?: ImageExportOptions
 ): Promise<RenderedDesignItem[]> {
-  const outFormat = effectiveFormat(format, imageOptions?.removeBackground);
   const results: RenderedDesignItem[] = [];
   const total = pageIndexes.length;
 
@@ -235,10 +250,10 @@ export async function exportDesignsToFiles(
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const blob = await exportSingleDesign(project, pageIndex, format, quality, customDimensions, imageOptions);
-    const filename = generateFilename(page, pageIndex, outFormat);
+    const filename = generateFilename(page, pageIndex, format);
     let mimeType = 'image/png';
-    if (outFormat === 'jpeg') mimeType = 'image/jpeg';
-    else if (outFormat === 'webp') mimeType = 'image/webp';
+    if (format === 'jpeg') mimeType = 'image/jpeg';
+    else if (format === 'webp') mimeType = 'image/webp';
 
     const file = new File([blob], filename, { type: mimeType });
     const previewUrl = URL.createObjectURL(blob);
@@ -268,7 +283,6 @@ export async function exportAllDesignsZip(
   pageIndexes?: number[],
   imageOptions?: ImageExportOptions
 ): Promise<Blob> {
-  const outFormat = effectiveFormat(format, imageOptions?.removeBackground);
   // Only the pages that were chosen (all of them when nothing is chosen)
   const indexes = pageIndexes ?? project.pages.map((_, i) => i);
   const total = indexes.length;
@@ -294,7 +308,7 @@ export async function exportAllDesignsZip(
 
     const blob = await exportSingleDesign(project, i, format, quality, customDimensions, imageOptions);
     // The number in the file name is the page's real number in the project
-    zip.file(generateFilename(page, i, outFormat), blob);
+    zip.file(generateFilename(page, i, format), blob);
   }
 
   if (Object.keys(zip.files).length !== total) {

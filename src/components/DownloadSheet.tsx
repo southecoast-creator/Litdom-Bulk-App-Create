@@ -70,6 +70,8 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
 
   // Optional "Remove Background" (off unless the person ticks it; independent of the size)
   const [removeBackground, setRemoveBackground] = useState(false);
+  // Only used when the format is JPG: JPG cannot be transparent, so removed areas get this colour
+  const [jpgFillColor, setJpgFillColor] = useState('#FFFFFF');
   const [bgPreview, setBgPreview] = useState<{ url: string | null; message: string | null; busy: boolean }>({
     url: null,
     message: null,
@@ -146,8 +148,8 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
 
   if (!isOpen) return null;
 
-  // JPG cannot be transparent, so a JPG + Remove Background export is saved as PNG (and we say so)
-  const forcedPng = removeBackground && (fileType === '.jpg' || fileType === '.jpeg');
+  // JPG cannot be transparent. The format is NOT changed: removed areas are filled with a colour instead
+  const jpgNoAlpha = removeBackground && (fileType === '.jpg' || fileType === '.jpeg');
 
   const getQualityNumeric = () => {
     switch (quality) {
@@ -214,11 +216,9 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
             fmt,
             qual,
             customDim,
-            { removeBackground }
+            { removeBackground, jpgFillColor }
           );
-          const ext = forcedPng
-            ? 'png'
-            : fileType === '.jpg' ? 'jpg' : fileType === '.jpeg' ? 'jpeg' : fileType === '.webp' ? 'webp' : 'png';
+          const ext = fileType === '.jpg' ? 'jpg' : fileType === '.jpeg' ? 'jpeg' : fileType === '.webp' ? 'webp' : 'png';
           triggerDownload(blob, `${cleanProjectName}_page_${pagesToExport[0] + 1}.${ext}`);
         } else {
           // Multiple Images -> ZIP
@@ -229,7 +229,7 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
             customDim,
             (p) => setProgress(p),
             pagesToExport,
-            { removeBackground }
+            { removeBackground, jpgFillColor }
           );
           triggerDownload(zipBlob, `${cleanProjectName}_batch.zip`);
         }
@@ -350,18 +350,32 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
                 </label>
                 {removeBackground && (
                   <div className="flex flex-col gap-1.5">
-                    {forcedPng && (
-                      <span className="text-[10px] font-semibold leading-tight text-black/80">
-                        JPG cannot be transparent, so this will be saved as PNG.
-                      </span>
+                    {jpgNoAlpha && (
+                      <>
+                        <span className="text-[10px] font-semibold leading-tight text-black/80">
+                          JPG cannot keep transparency. Removed areas will be filled with this colour. Pick PNG or WebP to keep them transparent.
+                        </span>
+                        <label className="flex items-center justify-between bg-black text-white rounded-xl px-2.5 py-1 text-[11px] font-bold">
+                          <span>Fill colour</span>
+                          <input
+                            type="color"
+                            value={jpgFillColor}
+                            onChange={(e) => setJpgFillColor(e.target.value)}
+                            className="w-6 h-5 bg-transparent border-0 p-0 cursor-pointer"
+                          />
+                        </label>
+                      </>
                     )}
                     <div
                       className="w-full h-24 rounded-xl border border-black/30 overflow-hidden flex items-center justify-center"
-                      style={{
-                        backgroundImage:
-                          'conic-gradient(#ccc 25%, #fff 0 50%, #ccc 0 75%, #fff 0)',
-                        backgroundSize: '12px 12px',
-                      }}
+                      style={
+                        jpgNoAlpha
+                          ? { backgroundColor: jpgFillColor }
+                          : {
+                              backgroundImage: 'conic-gradient(#ccc 25%, #fff 0 50%, #ccc 0 75%, #fff 0)',
+                              backgroundSize: '12px 12px',
+                            }
+                      }
                     >
                       {bgPreview.busy ? (
                         <RefreshCw className="w-4 h-4 animate-spin text-black/60" />
@@ -465,8 +479,9 @@ export const DownloadSheet: React.FC<DownloadSheetProps> = ({
 
         {fileType !== '.pdf' && removeBackground && (
           <div className="text-[11px] font-semibold text-black -mt-2">
-            Background will be removed (transparent).
-            {forcedPng ? ' JPG cannot be transparent, so it saves as PNG.' : ''}
+            {jpgNoAlpha
+              ? 'Background will be removed and filled with your chosen colour, because JPG cannot be transparent. It stays a JPG.'
+              : 'Background will be removed (transparent).'}
           </div>
         )}
 
